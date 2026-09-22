@@ -86,6 +86,12 @@ def test_reward_slope_early_and_mid_split_the_run():
     assert f.reward_slope_early == pytest.approx(0.0, abs=1e-9)
 
 
+def test_empty_steps_raises_rather_than_producing_nan():
+    t = make_telemetry([], [], [])
+    with pytest.raises(ValueError, match="zero steps"):
+        extract_features(t)
+
+
 def test_round_trip_json():
     t = make_telemetry([2.0] * 3, [0.1] * 3, [0.2] * 3)
     back = ProbeTelemetry.from_json(json.loads(t.to_json()))

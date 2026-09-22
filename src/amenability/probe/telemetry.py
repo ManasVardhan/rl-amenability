@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
@@ -81,6 +81,16 @@ def _slope(ys: list[float]) -> float:
 
 
 def extract_features(t: ProbeTelemetry) -> FeatureVector:
+    # A telemetry record with zero steps has no measurement to derive features
+    # from. Without this guard, zero_advantage_rate = np.mean([]) would be
+    # nan, and since every comparison involving nan is False, that nan would
+    # propagate silently into the score instead of showing up as an outlier.
+    if not t.steps:
+        raise ValueError(
+            f"cannot extract features from {t.model_key}/{t.algorithm}: "
+            "telemetry contains zero steps"
+        )
+
     entropies = [s.policy_entropy for s in t.steps]
     rewards = [s.mean_reward for s in t.steps]
     kls = [s.kl for s in t.steps]
