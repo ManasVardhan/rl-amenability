@@ -37,3 +37,24 @@ def test_get_unknown_suite_raises():
     reg = SuiteRegistry()
     with pytest.raises(KeyError):
         reg.get("nope")
+
+
+def test_failed_registration_leaves_registry_unchanged():
+    reg = SuiteRegistry()
+    reg.register("probe", [item("probe/1"), item("probe/2")])
+
+    # Attempt to register with a non-colliding item first, collision second
+    with pytest.raises(SuiteOverlapError, match="probe/1"):
+        reg.register("target", [item("target/1"), item("probe/1")])
+
+    # Verify registry unchanged
+    assert "target" not in reg.names()
+    assert reg.names() == ["probe"]
+    assert len(reg.get("probe")) == 2
+    with pytest.raises(KeyError):
+        reg.get("target")
+
+    # Verify target/1 was not leaked into internal seen set
+    # by successfully registering another suite with it
+    reg.register("other", [item("target/1")])
+    assert "other" in reg.names()
