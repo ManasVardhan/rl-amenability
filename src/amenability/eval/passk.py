@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Callable
 
@@ -9,7 +10,7 @@ from amenability.suites.base import TaskItem
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
-    """Unbiased pass@k estimator (Chen et al., 2021), computed stably in log space."""
+    """Unbiased pass@k estimator (Chen et al., 2021), computed as a running product of (1 - k/i) to avoid forming large binomial coefficients."""
     if k > n:
         raise ValueError(f"k={k} exceeds n={n}")
     if n - c < k:
@@ -48,10 +49,25 @@ def evaluate_passk(
 ) -> PassKResult:
     generate = generate_fn or _vllm_generate
     prompts = {it.task_id: it.prompt for it in items}
+
+    # Guards against silent misattribution in the measurement layer.
+    # Silent errors here would corrupt every downstream number invisibly.
+    # Check 1: Duplicate task_ids would collapse in the prompts dict.
+    if len(prompts) != len(items):
+        dupes = [tid for tid, count in Counter(it.task_id for it in items).items() if count > 1]
+        raise ValueError(f"duplicate task_id(s) in items: {sorted(dupes)}")
+
     completions = generate(model_path, prompts, n_samples, temperature, seed)
+
+    # Check 2: Generator returned wrong number of result lists.
+    if len(completions) != len(items):
+        raise ValueError(f"generator returned {len(completions)} result lists for {len(items)} items")
 
     per_item_correct: dict[str, int] = {}
     for it, comps in zip(items, completions):
+        # Check 3: Each result list must have exactly n_samples entries.
+        if len(comps) != n_samples:
+            raise ValueError(f"generator returned {len(comps)} samples for {it.task_id}, expected {n_samples}")
         per_item_correct[it.task_id] = sum(1 for c in comps if verify_fn(it, c))
 
     ks_out: dict[int, float] = {}

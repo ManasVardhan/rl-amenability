@@ -57,3 +57,60 @@ def test_evaluate_passk_with_injected_generator():
     assert res.ks[1] == pytest.approx(0.25)
     # pass@2 for item 0: 1 - C(2,2)/C(4,2) = 1 - 1/6
     assert res.ks[2] == pytest.approx(((1 - 1 / 6) + 0.0) / 2)
+
+
+def test_duplicate_task_ids_raise():
+    items = [
+        TaskItem(task_id="t/0", suite="s", prompt="p1", answer="1", difficulty=0),
+        TaskItem(task_id="t/0", suite="s", prompt="p2", answer="1", difficulty=0),
+    ]
+
+    def fake_generate(model_path, prompts, n, temperature, seed):
+        return [["1"] * n for _ in range(len(prompts))]
+
+    def verify(item, completion):
+        return completion == item.answer
+
+    with pytest.raises(ValueError, match="duplicate task_id"):
+        evaluate_passk(
+            model_path="unused", items=items, verify_fn=verify,
+            ks=(1,), n_samples=1, temperature=1.0, seed=0, generate_fn=fake_generate,
+        )
+
+
+def test_generator_returning_wrong_number_of_results_raises():
+    items = [
+        TaskItem(task_id=f"t/{i}", suite="s", prompt="p", answer="1", difficulty=0)
+        for i in range(2)
+    ]
+
+    def fake_generate(model_path, prompts, n, temperature, seed):
+        return [["1"] * n]  # Return only 1 result instead of 2
+
+    def verify(item, completion):
+        return completion == item.answer
+
+    with pytest.raises(ValueError, match="generator returned 1 result lists for 2 items"):
+        evaluate_passk(
+            model_path="unused", items=items, verify_fn=verify,
+            ks=(1,), n_samples=1, temperature=1.0, seed=0, generate_fn=fake_generate,
+        )
+
+
+def test_generator_returning_wrong_sample_count_raises():
+    items = [
+        TaskItem(task_id=f"t/{i}", suite="s", prompt="p", answer="1", difficulty=0)
+        for i in range(2)
+    ]
+
+    def fake_generate(model_path, prompts, n, temperature, seed):
+        return [["1"] * 2, ["1"] * 1]  # Second item has only 1 sample instead of 2
+
+    def verify(item, completion):
+        return completion == item.answer
+
+    with pytest.raises(ValueError, match="generator returned 1 samples for t/1, expected 2"):
+        evaluate_passk(
+            model_path="unused", items=items, verify_fn=verify,
+            ks=(1,), n_samples=2, temperature=1.0, seed=0, generate_fn=fake_generate,
+        )
