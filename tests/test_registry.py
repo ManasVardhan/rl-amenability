@@ -20,10 +20,15 @@ def test_at_least_seven_families():
     assert len({m.family for m in reg.values()}) >= 7
 
 
-def test_all_models_within_size_band():
+def test_all_models_within_compute_budget_band():
+    # The bounds are wider than the nominal 0.5B-1.7B size class because
+    # actual model parameter counts differ from nominal names (e.g., Qwen2.5-0.5B has 0.49B).
     reg = load_registry()
     for m in reg.values():
-        assert 0.3 <= m.params_b <= 1.8, f"{m.key} at {m.params_b}B is outside 0.5-1.7B band"
+        assert 0.3 <= m.params_b <= 1.8, (
+            f"{m.key} at {m.params_b}B is outside the 0.3-1.8B compute-budget band "
+            f"(nominal 0.5B-1.7B size class)"
+        )
 
 
 def test_spurious_reward_outlier_present():

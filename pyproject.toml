@@ -8,7 +8,6 @@ dependencies = [
     "trl>=0.21",
     "datasets>=3.0",
     "accelerate>=1.0",
-    "vllm>=0.10",
     "numpy>=1.26",
     "scipy>=1.14",
     "pyyaml>=6.0",
@@ -16,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-mock>=3.14"]
+gpu = ["vllm>=0.10"]
 
 [build-system]
 requires = ["hatchling"]
