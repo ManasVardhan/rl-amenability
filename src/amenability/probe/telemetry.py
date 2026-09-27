@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -90,6 +91,25 @@ def extract_features(t: ProbeTelemetry) -> FeatureVector:
             f"cannot extract features from {t.model_key}/{t.algorithm}: "
             "telemetry contains zero steps"
         )
+
+    # Check every step for non-finite values. max(0.0, -nan) returns 0.0 rather than nan
+    # (because nan > 0.0 is False), so a non-finite entropy_slope would be silently
+    # scored as perfect retention. Catch this at the source before it propagates.
+    for s in t.steps:
+        for field_name, value in (
+            ("policy_entropy", s.policy_entropy),
+            ("kl", s.kl),
+            ("grad_norm", s.grad_norm),
+            ("mean_reward", s.mean_reward),
+            ("group_reward_std", s.group_reward_std),
+            ("zero_advantage_frac", s.zero_advantage_frac),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"non-finite {field_name}={value} at step {s.step} for "
+                    f"{t.model_key}/{t.algorithm}: training likely diverged, and a "
+                    "non-finite entropy would otherwise be scored as perfect retention"
+                )
 
     entropies = [s.policy_entropy for s in t.steps]
     rewards = [s.mean_reward for s in t.steps]

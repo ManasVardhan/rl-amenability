@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 from amenability.probe.telemetry import FeatureVector
 from amenability.scoring.score import amenability_score, zscore
 
@@ -15,6 +16,12 @@ def test_zscore_centres_and_scales():
     z = zscore([1.0, 2.0, 3.0])
     assert z[1] == pytest.approx(0.0)
     assert z[0] == pytest.approx(-z[2])
+    # Population std is sqrt(2/3) ~ 0.816496580927726
+    assert z[0] == pytest.approx(-1.224744871391589)
+    assert z[1] == pytest.approx(0.0)
+    assert z[2] == pytest.approx(1.224744871391589)
+    # Verify unit variance: output standard deviation is 1.0
+    assert np.std(z) == pytest.approx(1.0)
 
 
 def test_zscore_of_constant_input_is_all_zeros():
@@ -59,3 +66,18 @@ def test_score_is_deterministic():
 
 def test_empty_input_returns_empty():
     assert amenability_score([]) == []
+
+
+def test_non_finite_conversion_rate_raises():
+    with pytest.raises(ValueError, match="non-finite conversion_rate"):
+        amenability_score([fv(float('nan'), 0.5)])
+
+
+def test_non_finite_retention_factor_raises():
+    with pytest.raises(ValueError, match="non-finite retention_factor"):
+        amenability_score([fv(0.5, float('inf'))])
+
+
+def test_non_finite_zero_advantage_rate_raises():
+    with pytest.raises(ValueError, match="non-finite zero_advantage_rate"):
+        amenability_score([fv(0.5, 0.5, zar=float('nan'))])

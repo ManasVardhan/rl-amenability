@@ -98,3 +98,21 @@ def test_round_trip_json():
     assert back.model_key == t.model_key
     assert len(back.steps) == 3
     assert back.pre.ks[32] == pytest.approx(0.50)
+
+
+def test_non_finite_entropy_raises():
+    t = make_telemetry([float('nan')] + [2.0] * 9, [0.1] * 10, [0.2] * 10)
+    with pytest.raises(ValueError, match="non-finite policy_entropy"):
+        extract_features(t)
+
+
+def test_non_finite_kl_raises():
+    t = make_telemetry([2.0] * 10, [0.1] * 10, [0.2] * 10, kls=[float('inf')] + [0.01] * 9)
+    with pytest.raises(ValueError, match="non-finite kl"):
+        extract_features(t)
+
+
+def test_non_finite_infinity_also_raises():
+    t = make_telemetry([2.0] * 10, [float('inf')] + [0.1] * 9, [0.2] * 10)
+    with pytest.raises(ValueError, match="non-finite mean_reward"):
+        extract_features(t)
