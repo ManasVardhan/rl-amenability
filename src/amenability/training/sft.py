@@ -65,5 +65,11 @@ def run_sft(spec: SFTSpec, trainer_factory=None, peft_config=None) -> None:
             model=spec.model_path, args=config, train_dataset=dataset, **kw
         )
     trainer = trainer_factory()
+    model_obj = getattr(trainer, "model", None)
+    if model_obj is not None and hasattr(model_obj, "peft_config"):
+        raise ValueError(
+            "trainer was constructed with a PEFT/LoRA model, which this benchmark "
+            "forbids: LoRA constrains weight movement, the quantity under measurement."
+        )
     trainer.train()
     trainer.save_model(spec.output_dir)

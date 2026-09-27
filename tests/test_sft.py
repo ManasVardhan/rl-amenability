@@ -76,3 +76,22 @@ def test_run_sft_rejects_lora_config():
     )
     with pytest.raises(ValueError, match="LoRA"):
         run_sft(spec, trainer_factory=lambda **kw: None, peft_config={"r": 8})
+
+
+def test_run_sft_rejects_lora_wrapped_model_from_factory():
+    class PeftLikeTrainer:
+        def __init__(self, **kwargs):
+            self.model = type("M", (), {"peft_config": {"r": 8}})()
+
+        def train(self):
+            raise AssertionError("train() should not be reached")
+
+        def save_model(self, path):
+            raise AssertionError("save_model() should not be reached")
+
+    spec = SFTSpec(
+        model_path="fake", model_key="m", records=[{"prompt": "p", "completion": "c"}],
+        max_steps=10, learning_rate=1e-5, seed=0, output_dir="/tmp/sft", save_steps=None,
+    )
+    with pytest.raises(ValueError, match="LoRA"):
+        run_sft(spec, trainer_factory=lambda **kw: PeftLikeTrainer(**kw))
