@@ -1,4 +1,5 @@
 import json
+import subprocess
 import pytest
 from pathlib import Path
 from prereg.freeze import freeze, verify_freeze, compute_hashes, FreezeViolation, FROZEN_PATHS
@@ -62,3 +63,24 @@ def test_hashes_are_content_addressed_not_path_addressed(fake_root):
     (fake_root / "prereg" / "stage0.md").write_text("content of src/amenability/scoring/score.py\n")
     h2 = compute_hashes(fake_root)
     assert h2["prereg/stage0.md"] == h1["src/amenability/scoring/score.py"]
+
+
+def test_manifest_records_the_git_commit(fake_root):
+    subprocess.run(["git", "init"], cwd=fake_root, capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@test.com", "-c", "user.name=test", "add", "."],
+        cwd=fake_root, capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.email=test@test.com", "-c", "user.name=test", "commit", "-m", "init"],
+        cwd=fake_root, capture_output=True, check=True,
+    )
+    manifest = freeze(fake_root)
+    assert isinstance(manifest["git_commit"], str)
+    assert len(manifest["git_commit"]) == 40
+    assert all(c in "0123456789abcdef" for c in manifest["git_commit"])
+
+
+def test_freeze_succeeds_without_git(fake_root):
+    manifest = freeze(fake_root)
+    assert manifest["git_commit"] is None

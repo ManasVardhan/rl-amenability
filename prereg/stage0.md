@@ -21,6 +21,28 @@ Frozen before any Stage 0 ground-truth run. The commit hash of this file is cite
 - Probe budget: 60 GRPO steps, 150 SFT steps. Full budget: 600 GRPO steps, 1500 SFT steps.
 - Breadth k = 32. pass@64 computed at endpoints only.
 
+## What the freeze mechanism does and does not guarantee
+
+The freeze is a SHA-256 manifest of the analysis files, stored at `prereg/FROZEN.json` in
+this same repository and committed to git. `verify_freeze` runs before any ground-truth
+run and refuses to proceed if a hashed file has changed.
+
+What it guarantees: the analysis code cannot drift accidentally or incrementally between
+the freeze and the run. An edit to the score, the baselines, the gates or the roster
+after freezing halts the pipeline with a named violation rather than silently changing a
+result. Because the manifest is committed, it also records a git-visible point in history,
+and the manifest names the commit that was HEAD when the freeze was taken.
+
+What it does NOT guarantee: it is not cryptographic protection against a determined
+operator. The manifest is unsigned and lives in a repository writable by whoever can edit
+the analysis code, so deleting the manifest, editing a file and re-freezing would produce
+a self-consistent state that passes verification. Defeating the freeze therefore requires
+a deliberate, git-visible sequence of actions rather than a silent edit, and that is the
+property being relied on. The guarantee is procedural and auditable, not cryptographic.
+
+Anyone auditing this work should inspect the git history of `prereg/FROZEN.json` and
+confirm that the commit it names precedes the commits containing Stage 0 results.
+
 ## Gate thresholds
 
 - **Gate A passes** when the score's ordering is correct within both control families
