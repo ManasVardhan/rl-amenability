@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from amenability.suites.base import TaskItem
 from amenability.training.grpo import (
@@ -85,3 +87,75 @@ def test_run_grpo_rejects_lora_config():
     )
     with pytest.raises(ValueError, match="LoRA"):
         run_grpo(spec, trainer_factory=lambda **kw: None, peft_config={"r": 8})
+
+
+class _FakeTrainer:
+    def __init__(self, **kwargs):
+        self.captured = kwargs
+        self.model = object()
+
+    def train(self):
+        for cb in self.captured["callbacks"]:
+            for step in (1, 2, 3):
+                cb.on_log(
+                    args=None,
+                    state=type("S", (), {"global_step": step, "log_history": []})(),
+                    control=None,
+                    logs={"kl": 0.01 * step, "grad_norm": 1.0},
+                )
+
+    def save_model(self, path):
+        self.saved_to = path
+
+
+def test_run_grpo_writes_a_run_manifest(tmp_path):
+    output_dir = str(tmp_path / "out")
+    spec = GRPOSpec(
+        model_path="fake", model_key="m", items=items(), verify_fn=verify,
+        max_steps=3, num_generations=2, learning_rate=1e-6, beta=0.04,
+        temperature=1.0, seed=0, output_dir=output_dir, save_steps=None,
+    )
+    records = run_grpo(spec, trainer_factory=lambda **kw: _FakeTrainer(**kw))
+
+    manifest = json.loads((tmp_path / "out" / "run_manifest.json").read_text())
+    assert manifest["expected_checkpoints"] == checkpoint_schedule(
+        spec.max_steps, spec.save_steps
+    )
+    assert manifest["seed"] == spec.seed
+    assert manifest["n_step_records"] == len(records)
+
+
+def test_run_grpo_rejects_lora_wrapped_model_from_factory():
+    class PeftLikeTrainer:
+        def __init__(self, **kwargs):
+            self.captured = kwargs
+            self.model = type("M", (), {"peft_config": {"r": 8}})()
+
+        def train(self):
+            raise AssertionError("train() should not be reached")
+
+        def save_model(self, path):
+            raise AssertionError("save_model() should not be reached")
+
+    spec = GRPOSpec(
+        model_path="fake", model_key="m", items=items(), verify_fn=verify,
+        max_steps=3, num_generations=2, learning_rate=1e-6, beta=0.04,
+        temperature=1.0, seed=0, output_dir="/tmp/out", save_steps=None,
+    )
+    with pytest.raises(ValueError, match="LoRA"):
+        run_grpo(spec, trainer_factory=lambda **kw: PeftLikeTrainer(**kw))
+
+
+def test_build_reward_fn_rejects_duplicate_prompt_text():
+    dup_items = [
+        TaskItem(task_id="probe/x/0", suite="s", prompt="same", answer="7", difficulty=1),
+        TaskItem(task_id="probe/x/1", suite="s", prompt="same", answer="9", difficulty=1),
+    ]
+    with pytest.raises(ValueError, match="share prompt text"):
+        build_reward_fn(dup_items, verify)
+
+
+def test_reward_fn_raises_on_total_prompt_mismatch():
+    fn = build_reward_fn(items(2), verify)
+    with pytest.raises(ValueError, match="matched any known item"):
+        fn(completions=["7", "7"], prompts=["not-a-prompt", "also-not-a-prompt"])

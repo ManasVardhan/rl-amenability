@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from amenability.probe.callbacks import GroupedRewardRecorder, TelemetryCallback
@@ -38,9 +40,20 @@ def checkpoint_schedule(max_steps: int, save_steps: int | None) -> list[int]:
 
 def build_reward_fn(items: list[TaskItem], verify_fn) -> Callable:
     by_prompt = {it.prompt: it for it in items}
+    if len(by_prompt) != len(items):
+        raise ValueError(
+            f"{len(items) - len(by_prompt)} item(s) share prompt text with another "
+            "item; reward attribution would be ambiguous"
+        )
 
     def reward_fn(completions, **kwargs):
         prompts = kwargs["prompts"]
+        if len(prompts) > 1 and not any(p in by_prompt for p in prompts):
+            raise ValueError(
+                f"no prompt in a batch of {len(prompts)} matched any known item; "
+                "prompt text is not reaching the reward function as expected, so every "
+                "reward would be 0.0 and the run would silently produce a null result"
+            )
         out = []
         for prompt, completion in zip(prompts, completions):
             item = by_prompt.get(prompt)
@@ -97,8 +110,35 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         model_getter=lambda: getattr(trainer, "model", None),
     )
     trainer = trainer_factory(reward_funcs=[reward_fn], callbacks=[callback])
+    model_obj = getattr(trainer, "model", None)
+    if model_obj is not None and hasattr(model_obj, "peft_config"):
+        raise ValueError(
+            "trainer was constructed with a PEFT/LoRA model, which this benchmark "
+            "forbids: LoRA constrains weight movement, the quantity under measurement."
+        )
     trainer.train()
     trainer.save_model(spec.output_dir)
+
+    Path(spec.output_dir).mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "model_key": spec.model_key,
+        "model_path": spec.model_path,
+        "algorithm": "grpo",
+        "max_steps": spec.max_steps,
+        "save_steps": spec.save_steps,
+        "num_generations": spec.num_generations,
+        "learning_rate": spec.learning_rate,
+        "beta": spec.beta,
+        "temperature": spec.temperature,
+        "seed": spec.seed,
+        "n_items": len(spec.items),
+        "expected_checkpoints": checkpoint_schedule(spec.max_steps, spec.save_steps),
+        "n_step_records": len(callback.records),
+    }
+    (Path(spec.output_dir) / "run_manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True)
+    )
+
     return callback.records
 
 
