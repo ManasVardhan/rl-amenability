@@ -8,8 +8,9 @@ def test_gate_a_passes_when_both_families_order_correctly():
     known = {"qwen": [2, 1, 0], "llama": [2, 1, 0]}
     res = evaluate_gate_a(scores, known)
     assert res.passed is True
-    # Pooled rho is 0.956, not 1.0: known_order ties across the two families.
-    assert res.statistic > 0.9
+    # Pooling is on within-family ranks, so a correct ordering in every family
+    # yields exactly 1.0 regardless of the families' absolute score levels.
+    assert res.statistic == pytest.approx(1.0)
 
 
 def test_gate_a_fails_when_one_family_inverts():
@@ -20,12 +21,25 @@ def test_gate_a_fails_when_one_family_inverts():
     assert "llama" in res.detail
 
 
-def test_gate_a_fails_when_pooled_rho_below_threshold():
-    # Ordering correct in both families but noisy enough to drag pooled rho down.
-    scores = {"qwen": [0.55, 0.50, 0.45], "llama": [0.10, 0.05, 0.00]}
+def test_gate_a_fails_when_one_family_ordering_is_partially_wrong():
+    # qwen is correctly ordered; llama has its two most-amenable checkpoints swapped.
+    # The ordering check catches llama, and the pooled statistic reflects the damage.
+    scores = {"qwen": [0.9, 0.4, 0.1], "llama": [0.5, 0.9, 0.1]}
     known = {"qwen": [2, 1, 0], "llama": [2, 1, 0]}
-    res = evaluate_gate_a(scores, known, threshold=0.99)
+    res = evaluate_gate_a(scores, known)
     assert res.passed is False
+    assert "llama" in res.detail
+
+
+def test_gate_a_passes_when_families_separate_in_score_level():
+    # Regression test for the raw-pooling defect: both families are correctly
+    # ordered but occupy disjoint score ranges. Under raw pooling this gave
+    # rho=0.478 and failed the 0.7 threshold despite a perfectly correct result.
+    scores = {"qwen": [1.4, 1.1, 0.8], "llama": [-0.8, -1.1, -1.4]}
+    known = {"qwen": [2, 1, 0], "llama": [2, 1, 0]}
+    res = evaluate_gate_a(scores, known)
+    assert res.passed is True
+    assert res.statistic == pytest.approx(1.0)
 
 
 def test_gate_a_rejects_mismatched_family_keys():

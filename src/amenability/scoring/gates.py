@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from scipy import stats
+
 from amenability.eval.stats import spearman_with_ci
 
 GATE_A_THRESHOLD = 0.7
@@ -35,9 +37,12 @@ def evaluate_gate_a(
         ranked = [s for _, s in sorted(zip(known, scores))]
         if ranked != sorted(ranked):
             failures.append(family)
-        # Pool on within-family z-free ranks so families with different absolute
-        # score levels do not dominate the pooled statistic.
-        pooled_scores.extend(scores)
+        # Pool WITHIN-FAMILY RANKS, not raw scores. Scores are z-scored across the whole
+        # roster, so two families can separate in absolute level; ranking globally would
+        # then let family membership dominate the pooled statistic and fail this gate on a
+        # correct result. Ranking within each family first makes the pooled statistic
+        # measure ordering recovery only, which is what Gate A tests.
+        pooled_scores.extend(float(r) for r in stats.rankdata(scores))
         pooled_known.extend(known)
 
     rho = spearman_with_ci(pooled_known, pooled_scores, n_boot=2000).rho
