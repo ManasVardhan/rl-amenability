@@ -38,9 +38,9 @@ Stage 0 builds the harness and runs the positive control through two gates. See 
 | ✅ | [7. Policy entropy measurement](../../issues/7) | 9 |
 | ✅ | [8. Telemetry callback and reward recorder](../../issues/8) | 8 |
 | ✅ | [9. GRPO runner](../../issues/9) | 12 |
-| 🔄 | [10. Rejection-sampling SFT arm](../../issues/10) | 7 |
-| ⬜ | [11. Pre-registered amenability score](../../issues/11) | 10 |
-| ⬜ | [12. Baselines the score must beat](../../issues/12) | 7 |
+| ✅ | [10. Rejection-sampling SFT arm](../../issues/10) | 8 |
+| ✅ | [11. Pre-registered amenability score](../../issues/11) | 13 |
+| 🔄 | [12. Baselines the score must beat](../../issues/12) | 7 |
 | ⬜ | [13. Small-N statistics](../../issues/13) | 10 |
 | ⬜ | [14. Pre-registration freeze](../../issues/14) | 8 |
 | ⬜ | [15. Gate A and Gate B evaluation](../../issues/15) | 9 |
@@ -48,7 +48,7 @@ Stage 0 builds the harness and runs the positive control through two gates. See 
 | ⬜ | [17. Stage 0 orchestration and report](../../issues/17) | 7 |
 | ⬜ | [18. Real runner and launch scripts](../../issues/18) | 3 (GPU) |
 
-**84 tests green.** Only task 18 needs a GPU, so the entire pipeline is verifiable before any allocation is spent.
+**108 tests green.** Only task 18 needs a GPU, so the entire pipeline is verifiable before any allocation is spent.
 
 ## The gates
 
