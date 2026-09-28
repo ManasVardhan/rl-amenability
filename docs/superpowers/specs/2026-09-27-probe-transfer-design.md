@@ -104,7 +104,7 @@ uppercase letters, so it is tokenizer-fair. Difficulty is controlled by node cou
   random distinct nodes, 32 tries) scores pass@32 of 0.94 on 6-node graphs with
   `n // 2` extra edges and distance >= 2, which would make the easy bucket's breadth
   mostly luck. At `(8, 10, 12)`, `n // 3`, distance >= 3 the same guesser scores
-  0.20 / 0.06 / 0.01. If the calibration pilot shows the suite is too hard at the
+  0.21 / 0.10 / 0.03. If the calibration pilot shows the suite is too hard at the
   small end (section 7), the bound contingency is `(7, 9, 11)`, where the easiest
   bucket guesses at 0.37, recorded as a ruling.
 - **Prompt.** Lists the edges as `A-B, B-C, ...`, names the source and target, and
@@ -118,7 +118,9 @@ uppercase letters, so it is tokenizer-fair. Difficulty is controlled by node cou
 - **Guessability bound, enforced by a test.** The informed-guesser baseline above,
   32 samples per item over 100 items per bucket, must score pass@32 < 0.3 in every
   bucket and < 0.15 averaged over the suite. This is the property that keeps the
-  breadth denominator informative, and it is asserted, not assumed.
+  breadth denominator informative, and it is asserted, not assumed. The bound
+  covers edge-blind guessing only: a random walk along the listed edges saturates
+  pass@32 (see `docs/decisions/transfer-rulings.md`, T4).
 - **Registry.** Suite name `probe_graphpath`, task IDs `probe/graphpath/{seed}/{idx}`.
   Registered in the same `SuiteRegistry` as `probe_countdown` and `target_gsm8k`, so
   disjointness is enforced by the existing mechanism.
