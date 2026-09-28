@@ -7,3 +7,4 @@ results/**/checkpoints/
 *.safetensors
 *.bin
 .DS_Store
+.superpowers/

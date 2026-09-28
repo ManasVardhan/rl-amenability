@@ -69,7 +69,7 @@ mechanism to point at rather than being a fitted black box.
 |---|---|
 | Gain type predicted | Capability gain on verifiable tasks (RLVR-style). Not behavioral alignment, not safety durability. |
 | Predictor class | Micro-probe: a short, real, fixed-budget RL/SFT run. Not training-free. |
-| Calibration scale | 10 models, 0.5B to 1.7B, controlled runs only (no public checkpoint pairs). |
+| Calibration scale | 10 models in the 0.5B to 1.7B nominal size class (0.3 to 1.8B actual parameter counts), controlled runs only (no public checkpoint pairs). |
 | Algorithms | GRPO and rejection-sampling SFT. No PPO (expected ~0.95 correlation with GRPO), no DPO. |
 | Primary claim | Causal: the probe detects experimentally induced amenability differences. |
 | Secondary claim | Observational: N=10 cross-model ranking, labeled preliminary. |
@@ -358,7 +358,9 @@ and leaderboard go public independently of either.
 
 ## 12. Limitations, stated up front
 
-- Validated at 0.5B to 1.7B only. No claim about models above 2B.
+- Validated on the 0.5B to 1.7B nominal size class only, meaning actual parameter
+  counts from 0.49B (Qwen2.5-0.5B) to 1.71B (SmolLM2-1.7B). No claim about models
+  above 2B.
 - Single training target (GSM8K). No claim about code, agentic, or multi-task settings.
 - Two algorithms (GRPO, rejection-sampling SFT). No claim about PPO or DPO.
 - N=10 observational plus N=6 causal. Observational results are preliminary by design.

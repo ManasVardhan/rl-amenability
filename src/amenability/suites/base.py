@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+class SuiteOverlapError(Exception):
+    """Raised when suites share task IDs, which would let a probe see target data."""
+
+
+@dataclass(frozen=True)
+class TaskItem:
+    task_id: str
+    suite: str
+    prompt: str
+    answer: str
+    difficulty: int
+
+
+class SuiteRegistry:
+    def __init__(self) -> None:
+        self._suites: dict[str, list[TaskItem]] = {}
+        self._seen: dict[str, str] = {}  # task_id -> owning suite
+
+    def register(self, name: str, items: list[TaskItem]) -> None:
+        if name in self._suites:
+            raise SuiteOverlapError(f"suite already registered: {name}")
+        local: set[str] = set()
+        for it in items:
+            if it.task_id in local:
+                raise SuiteOverlapError(f"duplicate task_id within suite {name}: {it.task_id}")
+            if it.task_id in self._seen:
+                raise SuiteOverlapError(
+                    f"task_id {it.task_id} already owned by suite {self._seen[it.task_id]}"
+                )
+            local.add(it.task_id)
+        for it in items:
+            self._seen[it.task_id] = name
+        self._suites[name] = list(items)
+
+    def get(self, name: str) -> list[TaskItem]:
+        return self._suites[name]
+
+    def names(self) -> list[str]:
+        return list(self._suites)
