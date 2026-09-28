@@ -1,0 +1,165 @@
+"""Probe suite: find any simple path between two nodes of a small undirected graph.
+
+Chosen as the second probe family because it has the SAME reward structure as
+Countdown (search for a witness, a verifier checks the witness, any valid witness is
+accepted) in a different domain, so a ranking disagreement between the two suites is
+attributable to domain rather than to reward shape. Node labels are single uppercase
+letters, which keeps the task tokenizer-fair.
+
+Bucket sizes, extra-edge count and minimum distance were set by simulation, not
+taste: an informed guesser (starts at the source, ends at the target, fills the
+middle with random distinct nodes) reaches pass@32 of 0.94 on 6-node graphs, which
+would make the easy bucket's breadth mostly luck. At (8, 10, 12) nodes, n // 3 extra
+edges and distance >= 3 the same guesser scores about 0.20 / 0.06 / 0.01, and
+`informed_guess_pass_at_k` exists so a test can hold that bound.
+"""
+from __future__ import annotations
+
+import random
+import re
+from collections import deque
+
+from amenability.suites.base import TaskItem
+
+SUITE_NAME = "probe_graphpath"
+EXTRA_EDGES_DIVISOR = 3
+MIN_DISTANCE = 3
+
+PROMPT = (
+    "An undirected graph has these edges: {edges}.\n"
+    "Find a path from {source} to {target} that only uses these edges and visits no "
+    "node twice.\n"
+    "Put only the path, as node names joined by ->, inside <answer></answer> tags."
+)
+
+_NODE_RE = re.compile(r"[A-Z]")
+
+
+def _labels(n: int) -> list[str]:
+    return [chr(ord("A") + i) for i in range(n)]
+
+
+def _adjacency(edges: set[frozenset[str]]) -> dict[str, set[str]]:
+    adj: dict[str, set[str]] = {}
+    for e in edges:
+        a, b = tuple(e)
+        adj.setdefault(a, set()).add(b)
+        adj.setdefault(b, set()).add(a)
+    return adj
+
+
+def shortest_distance(edges: set[frozenset[str]], source: str, target: str) -> int | None:
+    adj = _adjacency(edges)
+    if source not in adj or target not in adj:
+        return None
+    seen = {source}
+    queue = deque([(source, 0)])
+    while queue:
+        node, d = queue.popleft()
+        if node == target:
+            return d
+        for nxt in adj[node]:
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append((nxt, d + 1))
+    return None
+
+
+def _random_connected_graph(n: int, rng: random.Random) -> set[frozenset[str]]:
+    """A random spanning tree (so the graph is connected) plus n // 3 extra edges."""
+    labels = _labels(n)
+    order = labels[:]
+    rng.shuffle(order)
+    edges: set[frozenset[str]] = set()
+    for i in range(1, n):
+        edges.add(frozenset((order[i], order[rng.randrange(i)])))
+    while len(edges) < n - 1 + n // EXTRA_EDGES_DIVISOR:
+        edges.add(frozenset(rng.sample(labels, 2)))
+    return edges
+
+
+def _edge_string(edges: set[frozenset[str]]) -> str:
+    return ",".join(sorted("-".join(sorted(e)) for e in edges))
+
+
+def generate_graphpath(n: int, seed: int, buckets: tuple[int, ...] = (8, 10, 12)) -> list[TaskItem]:
+    rng = random.Random(seed)
+    items: list[TaskItem] = []
+    per_bucket = n // len(buckets)
+    for bucket in buckets:
+        made = 0
+        while made < per_bucket:
+            edges = _random_connected_graph(bucket, rng)
+            source, target = rng.sample(_labels(bucket), 2)
+            d = shortest_distance(edges, source, target)
+            if d is None or d < MIN_DISTANCE:
+                continue
+            edge_s = _edge_string(edges)
+            idx = len(items)
+            items.append(
+                TaskItem(
+                    task_id=f"probe/graphpath/{seed}/{idx}",
+                    suite=SUITE_NAME,
+                    prompt=PROMPT.format(
+                        edges=", ".join(edge_s.split(",")), source=source, target=target
+                    ),
+                    answer=f"{edge_s}|{source}|{target}",
+                    difficulty=bucket,
+                )
+            )
+            made += 1
+    return items
+
+
+def extract_path(completion: str) -> list[str] | None:
+    matches = re.findall(r"<answer>(.*?)</answer>", completion, flags=re.DOTALL)
+    if not matches:
+        return None
+    raw = matches[-1].strip()
+    if not raw:
+        return None
+    nodes = [p.strip() for p in raw.split("->")]
+    if not all(_NODE_RE.fullmatch(p) for p in nodes):
+        return None
+    return nodes
+
+
+def _parse_answer(item: TaskItem) -> tuple[set[frozenset[str]], str, str]:
+    edges_s, source, target = item.answer.split("|")
+    return {frozenset(e.split("-")) for e in edges_s.split(",")}, source, target
+
+
+def verify_graphpath(item: TaskItem, completion: str) -> bool:
+    path = extract_path(completion)
+    if path is None or len(path) < 2:
+        return False
+    edges, source, target = _parse_answer(item)
+    if path[0] != source or path[-1] != target:
+        return False
+    if len(set(path)) != len(path):
+        return False
+    return all(frozenset((a, b)) in edges for a, b in zip(path, path[1:]))
+
+
+def informed_guess_pass_at_k(items: list[TaskItem], k: int, seed: int) -> dict[int, float]:
+    """pass@k of a guesser that knows the format: starts at the source, ends at the
+    target, fills the middle with random distinct nodes of random length. This is the
+    strongest guesser that does no reasoning, and the bound the suite must clear."""
+    rng = random.Random(seed)
+    hits: dict[int, int] = {}
+    counts: dict[int, int] = {}
+    for it in items:
+        edges, source, target = _parse_answer(it)
+        labels = sorted({node for e in edges for node in e})
+        others = [x for x in labels if x not in (source, target)]
+        hit = False
+        for _ in range(k):
+            length = rng.randint(2, len(labels))
+            middle = rng.sample(others, length - 2)
+            completion = "<answer>" + "->".join([source, *middle, target]) + "</answer>"
+            if verify_graphpath(it, completion):
+                hit = True
+                break
+        counts[it.difficulty] = counts.get(it.difficulty, 0) + 1
+        hits[it.difficulty] = hits.get(it.difficulty, 0) + int(hit)
+    return {b: hits[b] / counts[b] for b in sorted(counts)}

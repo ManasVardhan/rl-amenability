@@ -157,9 +157,29 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         json.dumps(manifest, indent=2, sort_keys=True)
     )
 
-    return callback.records
+    records = list(callback.records)
+    # Break the closure before dropping the trainer. model_getter closes over the
+    # `trainer` variable, the trainer holds the callback, and this function reads
+    # callback.records, so without this the trainer (model, reference model,
+    # optimiser state) stays reachable and stays on the GPU. The probe then
+    # initialises a vLLM engine at 0.85 memory utilisation in the same process,
+    # which is the OOM issue #33 describes.
+    callback.model_getter = lambda: None
+    del callback, model_obj, trainer
+    _release_gpu()
+    return records
 
 
 class _NullEntropyProbe:
     def measure(self, model) -> float:
         return 0.0
+
+
+def _release_gpu() -> None:
+    import gc
+
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
