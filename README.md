@@ -48,7 +48,7 @@ Stage 0 builds the harness and runs the positive control through two gates. See 
 | ✅ | [17. Stage 0 orchestration and report](../../issues/17) | 8 |
 | ✅ | [18. Real runner and launch scripts](../../issues/18) | 3 (GPU) |
 
-**164 tests green**, plus 3 GPU-gated integration tests. Only task 18 needs a GPU, so the entire pipeline is verifiable before any allocation is spent.
+**177 tests green**, plus 3 GPU-gated integration tests. Only task 18 needs a GPU, so the entire pipeline is verifiable before any allocation is spent.
 
 ## The gates
 
