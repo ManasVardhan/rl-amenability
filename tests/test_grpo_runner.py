@@ -56,9 +56,14 @@ def test_run_grpo_returns_telemetry_from_injected_trainer():
             self.model = object()
 
         def train(self):
-            # Simulate three logging steps.
+            # Simulate three logging steps. Each real step scores a group of
+            # completions BEFORE the trainer logs, and the telemetry callback now
+            # requires that, so the fake must do it too.
             for cb in captured["callbacks"]:
                 for step in (1, 2, 3):
+                    captured["reward_funcs"][0](
+                        completions=["7", "8"], prompts=["p0", "p0"]
+                    )
                     cb.on_log(
                         args=None,
                         state=type("S", (), {"global_step": step, "log_history": []})(),
@@ -97,6 +102,10 @@ class _FakeTrainer:
     def train(self):
         for cb in self.captured["callbacks"]:
             for step in (1, 2, 3):
+                # A real step scores a group of completions before logging.
+                self.captured["reward_funcs"][0](
+                    completions=["7", "8"], prompts=["p0", "p0"]
+                )
                 cb.on_log(
                     args=None,
                     state=type("S", (), {"global_step": step, "log_history": []})(),
@@ -159,3 +168,20 @@ def test_reward_fn_raises_on_total_prompt_mismatch():
     fn = build_reward_fn(items(2), verify)
     with pytest.raises(ValueError, match="matched any known item"):
         fn(completions=["7", "7"], prompts=["not-a-prompt", "also-not-a-prompt"])
+
+
+def test_run_manifest_records_the_pinned_batch_shape(tmp_path):
+    # Spec 6.2 asks for token-based batching; sequence-based batching is pinned
+    # instead, and each run must record the shape it actually used.
+    from amenability.training.grpo import PROMPTS_PER_STEP
+
+    spec = GRPOSpec(
+        model_path="fake", model_key="m", items=items(), verify_fn=verify,
+        max_steps=3, num_generations=2, learning_rate=1e-6, beta=0.04,
+        temperature=1.0, seed=0, output_dir=str(tmp_path / "out"), save_steps=None,
+    )
+    run_grpo(spec, trainer_factory=lambda **kw: _FakeTrainer(**kw))
+    manifest = json.loads((tmp_path / "out" / "run_manifest.json").read_text())
+    assert manifest["prompts_per_step"] == PROMPTS_PER_STEP
+    assert manifest["per_device_train_batch_size"] == spec.num_generations
+    assert manifest["gradient_accumulation_steps"] == PROMPTS_PER_STEP

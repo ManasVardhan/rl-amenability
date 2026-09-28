@@ -31,10 +31,29 @@ def _vllm_generate(model_path: str, prompts: dict[str, str], n: int,
                    temperature: float, seed: int) -> list[list[str]]:
     from vllm import LLM, SamplingParams
 
+    # The engine MUST be released before returning. run_stage0 performs four
+    # evaluations plus two trainings per variant across six variants in a single
+    # process, so an un-released LLM holding 0.85 of device memory would make the
+    # second evaluation OOM and the first real run would never finish.
     llm = LLM(model=model_path, seed=seed, dtype="bfloat16", gpu_memory_utilization=0.85)
-    params = SamplingParams(n=n, temperature=temperature, top_p=0.95, max_tokens=768, seed=seed)
-    outputs = llm.generate(list(prompts.values()), params)
-    return [[o.text for o in out.outputs] for out in outputs]
+    try:
+        params = SamplingParams(
+            n=n, temperature=temperature, top_p=0.95, max_tokens=768, seed=seed
+        )
+        outputs = llm.generate(list(prompts.values()), params)
+        return [[o.text for o in out.outputs] for out in outputs]
+    finally:
+        try:
+            del llm
+            import gc
+
+            import torch
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 def evaluate_passk(

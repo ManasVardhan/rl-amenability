@@ -8,9 +8,11 @@ def test_gate_a_passes_when_both_families_order_correctly():
     known = {"qwen": [2, 1, 0], "llama": [2, 1, 0]}
     res = evaluate_gate_a(scores, known)
     assert res.passed is True
-    # Pooling is on within-family ranks, so a correct ordering in every family
-    # yields exactly 1.0 regardless of the families' absolute score levels.
-    assert res.statistic == pytest.approx(1.0)
+    # Pooling is on within-family MEAN-CENTRED scores, which removes the family
+    # offset while preserving within-family spacing. A correct ordering therefore
+    # gives a high but not automatically perfect rho: unlike rank pooling, the
+    # value still depends on how the two families' spacings interleave.
+    assert res.statistic == pytest.approx(0.956, abs=5e-4)
 
 
 def test_gate_a_fails_when_one_family_inverts():
@@ -39,7 +41,22 @@ def test_gate_a_passes_when_families_separate_in_score_level():
     known = {"qwen": [2, 1, 0], "llama": [2, 1, 0]}
     res = evaluate_gate_a(scores, known)
     assert res.passed is True
-    assert res.statistic == pytest.approx(1.0)
+    assert res.statistic == pytest.approx(0.956, abs=5e-4)
+
+
+def test_gate_a_can_fail_on_rho_alone_despite_correct_ordering_in_both_families():
+    # Under rank pooling this state was unreachable: any correct ordering gave
+    # rho exactly 1.0, so the rho condition could never bind and the conjunction
+    # collapsed to the ordering check. With centred pooling, one family's scores
+    # being compressed relative to the other lowers the pooled rho to 0.837, so
+    # a 0.9 threshold fails the gate even though every family is ordered right.
+    # This test documents that the rho condition does real work.
+    scores = {"qwen": [0.9, 0.4, 0.1], "llama": [0.52, 0.50, 0.48]}
+    known = {"qwen": [2, 1, 0], "llama": [2, 1, 0]}
+    res = evaluate_gate_a(scores, known, threshold=0.9)
+    assert res.statistic == pytest.approx(0.837, abs=5e-4)
+    assert res.passed is False
+    assert "ordering correct in all families" in res.detail
 
 
 def test_gate_a_rejects_mismatched_family_keys():

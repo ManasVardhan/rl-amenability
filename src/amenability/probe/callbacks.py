@@ -28,6 +28,15 @@ class GroupedRewardRecorder:
 
         return wrapped
 
+    def pending(self) -> bool:
+        """True when rewards have been accumulated since the last drain.
+
+        Callers need this to distinguish "no reward pass happened" from "a reward
+        pass happened and every reward was 0.0". Both make drain() return zeros,
+        but only the first means there was no training step to record.
+        """
+        return bool(self._rewards)
+
     def drain(self) -> tuple[float, float, float]:
         if not self._rewards:
             return (0.0, 0.0, 0.0)
@@ -52,6 +61,19 @@ class TelemetryCallback(TrainerCallback):
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         logs = logs or {}
+        # DO NOT REMOVE. transformers' Trainer._finalize_training calls
+        # self.log(metrics) AFTER training has ended, which fires on_log one
+        # extra time with no preceding reward pass. Without this check that
+        # phantom log appends a StepRecord with mean_reward=0.0, which silently
+        # drives reward_gain negative (so retention_factor collapses for every
+        # variant), makes baseline_naive fit a spurious zero point that biases
+        # the Gate B baseline down, and dilutes zero_advantage_rate.
+        #
+        # The test is whether the recorder actually has rewards buffered, NOT
+        # whether the drained mean is 0.0: a legitimate training step can score
+        # every completion 0.0, and that step must still be recorded.
+        if not self.recorder.pending():
+            return control
         mean_reward, group_std, zero_frac = self.recorder.drain()
         self.records.append(
             StepRecord(

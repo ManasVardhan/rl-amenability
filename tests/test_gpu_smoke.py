@@ -28,7 +28,10 @@ def test_two_step_grpo_produces_populated_telemetry(tmp_path: Path):
         temperature=1.0, seed=0, output_dir=str(tmp_path / "out"), save_steps=None,
     )
     records = run_grpo(spec)
-    assert len(records) >= 1
+    # EXACTLY two, not ">= 1". transformers' Trainer._finalize_training logs once
+    # more after training ends; a third record here means that phantom log is
+    # being recorded as a training step with mean_reward=0.0.
+    assert len(records) == 2, f"expected one record per training step, got {len(records)}"
     for r in records:
         assert r.policy_entropy > 0.0, "entropy probe returned zero on a real model"
         assert 0.0 <= r.zero_advantage_frac <= 1.0

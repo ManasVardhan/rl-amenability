@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 from amenability.eval.passk import evaluate_passk
@@ -42,7 +44,16 @@ class RealRunner:
             return self.registry[variant_key].hf_id
         return str(self.work_dir / "variants" / variant_key)
 
-    def probe(self, variant_key: str) -> ProbeTelemetry:
+    def probe(self, variant_key: str, force: bool = False) -> ProbeTelemetry:
+        # Stage 0 is roughly 130 GPU-hours of sequential work in one process under
+        # a 24-hour SLURM wall clock. Persisting each probe's telemetry, and
+        # reusing it on a later invocation, is what stops a timeout destroying
+        # every number measured before it.
+        telemetry_path = self.work_dir / "telemetry" / f"{variant_key}-grpo.json"
+        if not force and telemetry_path.exists():
+            print(f"reusing cached probe telemetry for {variant_key} from {telemetry_path}")
+            return ProbeTelemetry.from_json(json.loads(telemetry_path.read_text()))
+
         model_path = self._resolve(variant_key)
         pre = evaluate_passk(
             model_path, self.probe_items, verify_countdown, BREADTH_KS,
@@ -62,11 +73,23 @@ class RealRunner:
             str(out_dir), self.probe_items, verify_countdown, BREADTH_KS,
             n_samples=64, temperature=1.0, seed=self.config.seed,
         )
-        return ProbeTelemetry(
+        telemetry = ProbeTelemetry(
             model_key=variant_key, algorithm="grpo", steps=records, pre=pre, post=post
         )
+        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+        # Round-trip through to_json so ProbeTelemetry stays the single definition
+        # of the on-disk shape that from_json reads back.
+        telemetry_path.write_text(
+            json.dumps(json.loads(telemetry.to_json()), indent=2, sort_keys=True)
+        )
+        return telemetry
 
-    def full_run(self, variant_key: str) -> float:
+    def full_run(self, variant_key: str, force: bool = False) -> float:
+        outcome_path = self.work_dir / "outcomes" / f"{variant_key}.json"
+        if not force and outcome_path.exists():
+            print(f"reusing cached full-run outcome for {variant_key} from {outcome_path}")
+            return float(json.loads(outcome_path.read_text())["outcome"])
+
         model_path = self._resolve(variant_key)
         pre = evaluate_passk(
             model_path, self.target_eval, verify_gsm8k, (1, 32),
@@ -87,4 +110,32 @@ class RealRunner:
             n_samples=32, temperature=0.8, seed=self.config.seed,
         )
         breadth = pre.ks[32] - pre.ks[1]
-        return float((post.ks[1] - pre.ks[1]) / breadth) if breadth > 1e-9 else 0.0
+        # Same reasoning as extract_features: with no measurable breadth the
+        # conversion ratio is undefined, and returning 0.0 would look like a
+        # genuine measurement of no conversion while biasing the result in this
+        # project's favour. Over-SFT'd variants are where breadth may collapse.
+        if breadth <= 1e-9:
+            raise ValueError(
+                f"no measurable breadth for {variant_key} on the target suite: "
+                f"pre pass@1={pre.ks[1]!r}, pre pass@32={pre.ks[32]!r}, "
+                f"breadth={breadth!r}; a conversion ratio is undefined without "
+                "headroom and returning 0.0 would silently favour the hypothesis"
+            )
+        outcome = float((post.ks[1] - pre.ks[1]) / breadth)
+
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        outcome_path.write_text(
+            json.dumps(
+                {
+                    "variant_key": variant_key,
+                    "outcome": outcome,
+                    "outcome_secondary": float(post.ks[1] - pre.ks[1]),
+                    "breadth": breadth,
+                    "pre": asdict(pre),
+                    "post": asdict(post),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return outcome

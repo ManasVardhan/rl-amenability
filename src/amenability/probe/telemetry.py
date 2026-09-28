@@ -119,7 +119,20 @@ def extract_features(t: ProbeTelemetry) -> FeatureVector:
 
     breadth = t.pre.ks[BREADTH_K] - t.pre.ks[1]
     gain = t.post.ks[1] - t.pre.ks[1]
-    conversion_rate = float(gain / breadth) if breadth > 1e-9 else 0.0
+    # A model with no measurable breadth has no conversion ratio to compute.
+    # Returning 0.0 here would be indistinguishable from a genuine measurement of
+    # "converted none of its available headroom", and 0.0 is the direction that
+    # favours this project's hypothesis. Over-SFT'd variants are exactly where
+    # breadth may collapse, so the quiet version of this is biased. Raise instead,
+    # in the same spirit as the non-finite guards above.
+    if breadth <= 1e-9:
+        raise ValueError(
+            f"no measurable breadth for {t.model_key}/{t.algorithm}: "
+            f"pre pass@1={t.pre.ks[1]!r}, pre pass@{BREADTH_K}={t.pre.ks[BREADTH_K]!r}, "
+            f"breadth={breadth!r}; a conversion ratio is undefined without headroom "
+            "and scoring it 0.0 would silently favour the hypothesis"
+        )
+    conversion_rate = float(gain / breadth)
 
     entropy_slope = _slope(entropies)
     collapse_step = None

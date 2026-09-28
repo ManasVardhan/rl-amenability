@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from scipy import stats
+import numpy as np
 
 from amenability.eval.stats import spearman_with_ci
 
@@ -37,12 +37,15 @@ def evaluate_gate_a(
         ranked = [s for _, s in sorted(zip(known, scores))]
         if ranked != sorted(ranked):
             failures.append(family)
-        # Pool WITHIN-FAMILY RANKS, not raw scores. Scores are z-scored across the whole
-        # roster, so two families can separate in absolute level; ranking globally would
-        # then let family membership dominate the pooled statistic and fail this gate on a
-        # correct result. Ranking within each family first makes the pooled statistic
-        # measure ordering recovery only, which is what Gate A tests.
-        pooled_scores.extend(float(r) for r in stats.rankdata(scores))
+        # Pool WITHIN-FAMILY MEAN-CENTRED scores, not raw scores and not ranks.
+        # Scores are z-scored across the whole roster, so two families can separate
+        # in absolute level; centring removes the family-level offset that would
+        # otherwise let family membership dominate the pooled statistic, while
+        # preserving the within-family spacing that makes the pooled rho
+        # informative. Ranking would remove the offset too, but it would force rho
+        # to exactly 1.0 for any correct ordering and make this condition vacuous.
+        v = np.asarray(scores, dtype=float)
+        pooled_scores.extend(float(x) for x in (v - v.mean()))
         pooled_known.extend(known)
 
     rho = spearman_with_ci(pooled_known, pooled_scores, n_boot=2000).rho

@@ -12,6 +12,17 @@ from amenability.suites.base import TaskItem
 
 ENTROPY_BATCH_SIZE = 16
 
+# Spec section 6.2 asks for batches "sized by tokens, not sequences, for tokenizer
+# comparability". TRL's GRPOConfig offers no token-based batching, and building it
+# is out of scope here, so the batch shape is PINNED as sequences instead: one
+# device batch holds exactly one prompt's group of num_generations completions,
+# and PROMPTS_PER_STEP groups are accumulated per optimiser step. Leaving these
+# unset means TRL's defaults apply and the effective protocol silently depends on
+# the number of processes, so this is at least reproducible and machine-independent
+# across models. The deviation from token-based batching is a known limitation
+# recorded in the pre-registration, not a silent choice.
+PROMPTS_PER_STEP = 4
+
 
 @dataclass(frozen=True)
 class GRPOSpec:
@@ -91,6 +102,10 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
             beta=spec.beta,
             temperature=spec.temperature,
             num_generations=spec.num_generations,
+            # See PROMPTS_PER_STEP above: pins the batch shape so the protocol is
+            # identical across models and machines.
+            per_device_train_batch_size=spec.num_generations,
+            gradient_accumulation_steps=PROMPTS_PER_STEP,
             save_steps=spec.save_steps or spec.max_steps,
             logging_steps=1,
             seed=spec.seed,
@@ -127,6 +142,9 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         "max_steps": spec.max_steps,
         "save_steps": spec.save_steps,
         "num_generations": spec.num_generations,
+        "prompts_per_step": PROMPTS_PER_STEP,
+        "per_device_train_batch_size": spec.num_generations,
+        "gradient_accumulation_steps": PROMPTS_PER_STEP,
         "learning_rate": spec.learning_rate,
         "beta": spec.beta,
         "temperature": spec.temperature,

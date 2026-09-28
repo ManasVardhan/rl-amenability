@@ -31,10 +31,17 @@ def test_conversion_rate_normalises_by_available_breadth():
     assert f.conversion_rate == pytest.approx(0.5)
 
 
-def test_conversion_rate_is_zero_when_no_breadth_available():
+def test_no_available_breadth_raises_rather_than_scoring_zero_conversion():
+    # 0.0 would be indistinguishable from a genuine "converted nothing" measurement
+    # and is the hypothesis-favourable direction, so the absence of breadth must be
+    # loud rather than silently scored.
     t = make_telemetry([1.0] * 10, [0.1] * 10, [0.2] * 10)
     t.pre = PassKResult(ks={1: 0.5, 32: 0.5}, n_samples=32, n_items=10, per_item_correct={})
-    assert extract_features(t).conversion_rate == 0.0
+    with pytest.raises(ValueError, match="no measurable breadth") as excinfo:
+        extract_features(t)
+    msg = str(excinfo.value)
+    assert t.model_key in msg
+    assert "0.5" in msg
 
 
 def test_entropy_slope_is_negative_under_collapse():
