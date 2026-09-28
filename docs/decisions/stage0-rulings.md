@@ -401,3 +401,48 @@ reader assume the freeze covers everything, and tell an auditor to review the
 orchestrator's git history alongside the manifest.
 *Cost if wrong:* an undetected post-freeze orchestrator edit remains possible,
 mitigated by disclosure and by git history being the audit trail.
+
+## Post-review rulings (R35-R38)
+
+**R35. Accept both of the fix-wave implementer's beyond-instruction changes.**
+Neither was scope creep; both prevented a false statement standing in the repo.
+(a) The phantom-step fix broke two tests in `tests/test_grpo_runner.py` whose fake
+trainers never called the reward function at all. The implementer made them call it, as a
+real GRPO step does. Its observation is the lesson worth keeping: the test doubles were
+UNFAITHFUL to the real trainer, and that unfaithfulness is why the phantom step survived
+eighteen task reviews and 164 passing tests. A fake that does not model the interaction
+under test cannot protect the property it appears to cover.
+(b) A mandated comment asserted the sequence-batching deviation was recorded in the
+pre-registration when it was not. Rather than write a comment that lied, the implementer
+added the disclosure and made it true.
+*Cost if wrong:* two fakes exercise one more interaction; the prereg carries one more
+disclosed deviation.
+
+**R36. R34's claim that "both conditions of the conjunction stay meaningful" is FALSE, and the remedy is disclosure rather than a threshold change.**
+Exhaustive enumeration, independently reproduced with 200,000 randomised
+correctly-ordered draws across family scales spanning 1e-3 to 1e2, shows the attainable
+pooled rho when both families of three order correctly is exactly {0.8367, 0.9562}. The
+minimum is 0.8367, so `rho >= 0.7` can never fail while the ordering check passes. Gate A
+is effectively a one-part test.
+The threshold stays at 0.7. Raising it to 0.9 would make the compressed case bind, but it
+would introduce an unstudied instrumental failure mode where a correct ordering with weak
+within-family separation fails the gate; 0.9 sits between the only two attainable values,
+making it a threshold fitted to the attainable set rather than motivated by the science;
+and this gate has already been changed twice, which is where tuning should stop and
+documenting should start. Tracked as issue #31 for the owner to decide.
+*Cost if wrong:* Gate A is a one-part test at Stage 0, which it has effectively always
+been; disclosure makes that honest rather than changing it.
+
+**R37. `telemetry.py` belongs in `FROZEN_PATHS` (parked, issue #32).**
+`conversion_rate` and `retention_factor` are defined there, and they are two of the three
+quantities the score z-scores. R33 asserts the freeze covers the analysis definitions; it
+does not, and the review fix wave edited exactly that file's `conversion_rate`.
+*Cost if wrong:* the two scored feature definitions stay editable after the freeze without
+detection, and R33's disclosure is inaccurate.
+
+**R38. `run_grpo` must release trainer GPU memory before vLLM initialises (parked, issue #33).**
+Same defect class the fix wave closed on the vLLM side. Torch's caching allocator holds
+the training reservation when the probe's vLLM engine runs its init memory check at 0.85
+utilisation in the same process.
+*Cost if wrong:* the first real Stage 0 run OOMs at the first probe. Costs a queue slot,
+corrupts no result.
