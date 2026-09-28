@@ -8,7 +8,9 @@ vary lives in ProbeConfig's defaults.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -71,16 +73,29 @@ def _passk_from_dict(d: dict) -> PassKResult:
 
 
 def _write_json(path: Path, payload: dict) -> None:
+    """Write to a temp file in the same directory, then rename over the target.
+
+    A job killed mid-write (walltime, OOM, quota) must not leave a truncated file
+    at the cache path, where a later run would treat it as a finished result.
+    os.replace is atomic within one filesystem, hence the same directory.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
-def _peak_memory_bytes() -> int | None:
+def _cuda():
+    """torch.cuda when a GPU is present, else None; every memory field is then None."""
     import torch
 
-    if not torch.cuda.is_available():
-        return None
-    return int(torch.cuda.max_memory_allocated())
+    return torch.cuda if torch.cuda.is_available() else None
 
 
 def run_probe(
@@ -136,6 +151,13 @@ def run_probe(
     wall["pre"] = time.monotonic() - t0
 
     out_dir = work_dir / "probes" / key
+    cuda = _cuda()
+    # Reset the peak so peak_train_bytes measures training alone; the pre-eval
+    # peak is kept so peak_memory_bytes stays the whole job's figure.
+    pre_peak = None
+    if cuda is not None:
+        pre_peak = int(cuda.max_memory_allocated())
+        cuda.reset_peak_memory_stats()
     t0 = time.monotonic()
     records = train(
         GRPOSpec(
@@ -147,6 +169,8 @@ def run_probe(
         )
     )
     wall["train"] = time.monotonic() - t0
+    peak_train = None if cuda is None else int(cuda.max_memory_allocated())
+    allocated_after_train = None if cuda is None else int(cuda.memory_allocated())
 
     t0 = time.monotonic()
     post = evaluate_at(str(out_dir))
@@ -163,7 +187,9 @@ def run_probe(
         "item_seed": item_seed, "run_seed": run_seed,
         "learning_rate": config.learning_rate, "probe_steps": config.probe_steps,
         "n_step_records": len(records), "wall_seconds": wall,
-        "peak_memory_bytes": _peak_memory_bytes(),
+        "peak_memory_bytes": None if cuda is None else max(pre_peak, int(cuda.max_memory_allocated())),
+        "peak_train_bytes": peak_train,
+        "allocated_after_train_bytes": allocated_after_train,
     })
     manifest = out_dir / "run_manifest.json"
     if manifest.exists():

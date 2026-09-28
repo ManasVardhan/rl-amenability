@@ -153,3 +153,67 @@ def test_passk_by_bucket_uses_the_unbiased_estimator():
     assert out[1][4] == pytest.approx(0.5)       # pass@4 with n=4: (1.0 + 0.0) / 2
     assert out[2][1] == pytest.approx(0.5)       # (0.5 + 0.5) / 2
     assert out[2][4] == pytest.approx(1.0)       # 2 of 4 correct, k = n: guaranteed
+
+
+def test_memory_fields_exist_and_are_none_without_cuda(tmp_path, fakes, monkeypatch):
+    import torch
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    _run(tmp_path, fakes)
+    meta = json.loads(meta_path(tmp_path, "m", "countdown", 0).read_text())
+    for field in ("peak_memory_bytes", "peak_train_bytes", "allocated_after_train_bytes"):
+        assert field in meta and meta[field] is None
+
+
+def test_memory_fields_measure_training_from_a_reset_peak(tmp_path, fakes, monkeypatch):
+    """The peak is reset before training, so peak_train_bytes excludes the pre-eval."""
+    import torch
+    state, fake_passk, fake_train = fakes
+    mem = {"peak": 0, "now": 0, "events": []}
+
+    def passk(*a, **kw):
+        mem["peak"] = max(mem["peak"], 900)   # evaluation peaks at 900
+        return fake_passk(*a, **kw)
+
+    def train(spec, **kw):
+        mem["events"].append("train")
+        mem["peak"], mem["now"] = max(mem["peak"], 500), 120   # training peaks at 500, leaves 120
+        return fake_train(spec, **kw)
+
+    def reset():
+        mem["events"].append("reset")
+        mem["peak"] = mem["now"]
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", reset)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: mem["peak"])
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: mem["now"])
+    _run(tmp_path, fakes, evaluate_fn=passk, train_fn=train)
+    meta = json.loads(meta_path(tmp_path, "m", "countdown", 0).read_text())
+    assert mem["events"] == ["reset", "train"]
+    assert meta["peak_train_bytes"] == 500
+    assert meta["allocated_after_train_bytes"] == 120
+    assert meta["peak_memory_bytes"] == 900   # still the overall figure across the whole job
+
+
+def test_write_json_failure_leaves_no_partial_file_at_the_target(tmp_path, monkeypatch):
+    from amenability.probe import run as run_mod
+    target = tmp_path / "telemetry" / "x.json"
+    run_mod._write_json(target, {"old": True})
+    real_write_text = Path.write_text
+
+    def half_write(self, data, *a, **kw):
+        real_write_text(self, data[: len(data) // 2], *a, **kw)
+        raise OSError("disk quota exceeded")
+
+    monkeypatch.setattr(Path, "write_text", half_write)
+    with pytest.raises(OSError):
+        run_mod._write_json(target, {"new": "x" * 1000})
+    monkeypatch.undo()
+    assert json.loads(target.read_text()) == {"old": True}   # the old file is intact, not truncated
+    assert sorted(p.name for p in target.parent.iterdir()) == ["x.json"]   # no temp file left behind
+    fresh = tmp_path / "telemetry" / "y.json"
+    monkeypatch.setattr(Path, "write_text", half_write)
+    with pytest.raises(OSError):
+        run_mod._write_json(fresh, {"new": 1})
+    monkeypatch.undo()
+    assert not fresh.exists()
