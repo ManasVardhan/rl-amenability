@@ -44,3 +44,38 @@ def test_arguments_reach_run_probe(tmp_path):
     assert seen["work_dir"] == Path(tmp_path) and seen["pre_only"] is True
     assert seen["config"].probe_steps == 2 and seen["config"].learning_rate == pytest.approx(3e-6)
     assert seen["config"].num_generations == 8 and seen["config"].n_probe_items == 300
+
+
+@pytest.mark.parametrize("flags, named", [
+    (["--steps", "2"], "--steps"),
+    (["--lr", "3e-6"], "--lr"),
+    (["--item-seed", "1"], "--item-seed"),
+])
+def test_non_protocol_flags_refuse_default_work_dir(flags, named, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--model", "qwen2.5-0.5b", "--suite", "countdown", *flags],
+             run_probe_fn=lambda **kw: pytest.fail("ran"))
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert named in err and "--work-dir" in err
+
+
+def test_non_protocol_guard_matches_equivalent_default_path(capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["--model", "qwen2.5-0.5b", "--suite", "countdown", "--steps", "2",
+              "--work-dir", "./results/transfer"], run_probe_fn=lambda **kw: pytest.fail("ran"))
+    assert e.value.code == 2
+
+
+def test_full_run_prints_summary(tmp_path, capsys):
+    from amenability.eval.passk import PassKResult
+    from amenability.probe.telemetry import ProbeTelemetry, StepRecord
+
+    pk = PassKResult(ks={1: 0.1, 8: 0.2, 32: 0.3, 64: 0.4}, n_samples=64, n_items=1, per_item_correct={})
+    steps = [StepRecord(step=i, mean_reward=0.1, group_reward_std=0.2, zero_advantage_frac=0.5,
+                        policy_entropy=1.0, kl=0.01, grad_norm=1.0) for i in range(3)]
+    tele = ProbeTelemetry(model_key="qwen2.5-0.5b", algorithm="grpo", steps=steps, pre=pk, post=pk)
+    main(["--model", "qwen2.5-0.5b", "--suite", "countdown", "--work-dir", str(tmp_path)],
+         run_probe_fn=lambda **kw: tele)
+    out = capsys.readouterr().out
+    assert "qwen2.5-0.5b" in out and "3 steps recorded" in out
