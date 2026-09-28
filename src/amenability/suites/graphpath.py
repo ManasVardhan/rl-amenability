@@ -7,11 +7,16 @@ attributable to domain rather than to reward shape. Node labels are single upper
 letters, which keeps the task tokenizer-fair.
 
 Bucket sizes, extra-edge count and minimum distance were set by simulation, not
-taste: an informed guesser (starts at the source, ends at the target, fills the
-middle with random distinct nodes) reaches pass@32 of 0.94 on 6-node graphs, which
-would make the easy bucket's breadth mostly luck. At (8, 10, 12) nodes, n // 3 extra
-edges and distance >= 3 the same guesser scores about 0.20 / 0.06 / 0.01, and
-`informed_guess_pass_at_k` exists so a test can hold that bound.
+taste: an edge-blind guesser (starts at the source, ends at the target, fills the
+middle with random distinct nodes, ignores the edge list) reaches pass@32 of 0.94 on
+6-node graphs, which would make the easy bucket's breadth mostly luck. At (8, 10, 12)
+nodes, n // 3 extra edges and distance >= 3, measuring this implementation's
+`informed_guess_pass_at_k` on `generate_graphpath(n=300, seed=0)` with k=32, seed=0
+gives 0.21 / 0.10 / 0.03 (mean 0.113), and a test holds that bound.
+
+The bound covers edge-blind guessing only. A policy that reads the edge list and
+walks it at random without revisiting nodes saturates pass@32 (1.0 in every bucket
+on the same items), so this suite does not bound luck from edge-following.
 """
 from __future__ import annotations
 
@@ -130,6 +135,9 @@ def _parse_answer(item: TaskItem) -> tuple[set[frozenset[str]], str, str]:
 
 
 def verify_graphpath(item: TaskItem, completion: str) -> bool:
+    # Strict by design, matching the prompt's explicit format: near misses such as a
+    # trailing period, a Unicode arrow, backticks, comma separators or a capitalised
+    # tag score 0. Read low pass@1 with that in mind.
     path = extract_path(completion)
     if path is None or len(path) < 2:
         return False
@@ -142,9 +150,12 @@ def verify_graphpath(item: TaskItem, completion: str) -> bool:
 
 
 def informed_guess_pass_at_k(items: list[TaskItem], k: int, seed: int) -> dict[int, float]:
-    """pass@k of a guesser that knows the format: starts at the source, ends at the
-    target, fills the middle with random distinct nodes of random length. This is the
-    strongest guesser that does no reasoning, and the bound the suite must clear."""
+    """pass@k of a format-aware, edge-blind guesser: starts at the source, ends at the
+    target, fills the middle with random distinct nodes of random length, and ignores
+    the edge list. It is NOT the strongest non-reasoning guesser. Restricting guesses
+    to short lengths scores higher (about 0.50 / 0.24 / 0.23 on the test's items), and
+    a random walk along the listed edges with no revisits saturates pass@32 at 1.0.
+    The bound it supports is therefore against edge-blind guessing only."""
     rng = random.Random(seed)
     hits: dict[int, int] = {}
     counts: dict[int, int] = {}

@@ -1,4 +1,3 @@
-import pytest
 from amenability.suites.base import SuiteRegistry, TaskItem
 from amenability.suites.countdown import generate_countdown
 from amenability.suites.graphpath import (
@@ -117,10 +116,12 @@ def test_verifier_rejects_unparseable_and_lowercase():
 
 
 def test_informed_guesser_stays_well_below_saturation():
-    """The breadth denominator is pass@32 - pass@1. If a guesser that starts at the
-    source, ends at the target and fills the middle at random already reaches
-    pass@32 near 1.0, breadth measures luck, not capability. Bounded per bucket
-    and on average; the numbers come from the design-time simulation."""
+    """The breadth denominator is pass@32 - pass@1. If an edge-blind guesser that starts
+    at the source, ends at the target and fills the middle with random nodes already
+    reaches pass@32 near 1.0, breadth measures that guessing, not capability. This
+    bounds edge-blind guessing only, not luck in general: a random walk along the
+    listed edges saturates pass@32. Bounded per bucket and on average; the measured
+    rates at this seed are 0.21 / 0.10 / 0.03."""
     items = generate_graphpath(n=300, seed=0)
     rates = informed_guess_pass_at_k(items, k=32, seed=0)
     assert sorted(rates) == [8, 10, 12]
