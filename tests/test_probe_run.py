@@ -217,3 +217,43 @@ def test_write_json_failure_leaves_no_partial_file_at_the_target(tmp_path, monke
         run_mod._write_json(fresh, {"new": 1})
     monkeypatch.undo()
     assert not fresh.exists()
+
+
+def test_meta_is_written_before_telemetry_so_a_failed_commit_is_not_cached(tmp_path, fakes, monkeypatch):
+    # Telemetry is the cache marker, so it must be the last write. A job killed
+    # after meta but before telemetry must rerun, not hit the cache without meta.
+    from amenability.probe import run as run_mod
+    state = fakes[0]
+    real_write_json = run_mod._write_json
+    t_path = telemetry_path(tmp_path, "m", "countdown", 0)
+
+    def fail_on_telemetry(path, payload):
+        if path == t_path:
+            raise OSError("killed before telemetry")
+        real_write_json(path, payload)
+
+    monkeypatch.setattr(run_mod, "_write_json", fail_on_telemetry)
+    with pytest.raises(OSError):
+        _run(tmp_path, fakes)
+    monkeypatch.undo()
+    assert meta_path(tmp_path, "m", "countdown", 0).exists()
+    assert not t_path.exists()
+    assert len(state["train_specs"]) == 1
+    _run(tmp_path, fakes)
+    assert len(state["train_specs"]) == 2, "rerun hit the cache instead of retraining"
+    assert t_path.exists() and meta_path(tmp_path, "m", "countdown", 0).exists()
+
+
+def test_write_json_respects_the_umask_not_mkstemp_0600(tmp_path):
+    import os
+    from amenability.probe import run as run_mod
+    old = os.umask(0o022)
+    try:
+        target = tmp_path / "telemetry" / "x.json"
+        run_mod._write_json(target, {"a": 1})
+        assert target.stat().st_mode & 0o777 == 0o644
+        os.umask(0o027)
+        run_mod._write_json(target, {"a": 2})
+        assert target.stat().st_mode & 0o777 == 0o640
+    finally:
+        os.umask(old)

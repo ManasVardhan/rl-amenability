@@ -85,6 +85,12 @@ def _write_json(path: Path, payload: dict) -> None:
     tmp = Path(tmp_name)
     try:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+        # mkstemp creates the file 0600 and os.replace keeps that mode, which
+        # would make every result owner-only. Give it the mode a plain open()
+        # would have had. os.umask can only be read by setting it, so set it back.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -179,9 +185,10 @@ def run_probe(
     telemetry = ProbeTelemetry(
         model_key=model_key, algorithm="grpo", steps=records, pre=pre, post=post
     )
-    # Round-trip through to_json so ProbeTelemetry stays the single definition of
-    # the on-disk shape that from_json reads back.
-    _write_json(t_path, json.loads(telemetry.to_json()))
+    # Meta first, telemetry last: the telemetry file is the cache marker, so it is
+    # the commit. A job killed between the two writes leaves meta without
+    # telemetry, and the rerun retrains; the reverse order would leave a cache
+    # hit that never writes meta, a "missing meta" failure until --force.
     _write_json(meta_path(work_dir, model_key, suite_key, run_seed), {
         "probe_key": key, "model_key": model_key, "suite_key": suite_key,
         "item_seed": item_seed, "run_seed": run_seed,
@@ -191,6 +198,9 @@ def run_probe(
         "peak_train_bytes": peak_train,
         "allocated_after_train_bytes": allocated_after_train,
     })
+    # Round-trip through to_json so ProbeTelemetry stays the single definition of
+    # the on-disk shape that from_json reads back.
+    _write_json(t_path, json.loads(telemetry.to_json()))
     manifest = out_dir / "run_manifest.json"
     if manifest.exists():
         dest = work_dir / "manifests" / f"{key}.json"
