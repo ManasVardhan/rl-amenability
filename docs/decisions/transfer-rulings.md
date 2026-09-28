@@ -163,3 +163,46 @@ also asked for report wording: the leave-one-out row prints its N, the static
 comparator row says it is descriptive and includes breadth-excluded models, and
 the leaderboard gains a pre-probe breadth column per suite.
 *Cost if wrong:* a slightly larger fix wave before the batch; no protocol change.
+
+**T12. The scratch directory defaults to `/scratch1/$USER`.**
+The plan required `$SCRATCH` for the Hugging Face cache, but `$SCRATCH` is unset on
+CARC login nodes, so `${SCRATCH:?}` would have aborted every job. The launchers now
+use `${SCRATCH:-/scratch1/$USER}` as the scratch directory and default `HF_HOME` to
+its `hf` subdirectory, following CARC's personal scratch convention. Outside a dry
+run they fail fast with a message naming SCRATCH and HF_HOME when that directory
+does not exist, and the array also fails fast when `HF_HOME` itself is missing.
+A dry run skips the checks, so it still works on a laptop.
+*Cost if wrong:* the owner confirms the path with `ls -d /scratch1/$USER`; one
+environment variable to change.
+
+**T13. The array requests any A100; the smoke probe decides on 80 GB.**
+`probe_array.sbatch` requests `--gres=gpu:a100:1`, which lands on a 40 GB or an
+80 GB card. Only sixteen 80 GB GPUs exist on Discovery, so requiring them up front
+would lengthen the queue for jobs that may fit in 40 GB. If the smoke probe's
+`peak_train_bytes` exceeds 36e9, the batch adds `--constraint=a100-80gb` (the
+feature name confirmed from sinfo). H1's test allocation landed on a 40 GB card,
+and SmolLM2-1.7B with full-parameter fp32 AdamW plus a reference model is
+estimated at 35 to 40 GB, so the constraint is the likely outcome. No `--account`
+line is needed: anakano_429 is the default account.
+*Cost if wrong:* the smoke probe runs out of memory on a 40 GB node and is rerun
+with the constraint.
+
+**T14. The launchers load no CUDA module.**
+The plan's `module load cuda/12.4` is dropped from the new launchers; `module
+purge` stays in the array script. The pip torch and vllm wheels bundle the CUDA
+runtime and need only the driver (H1 found driver 580, which supports CUDA 12 and
+13 runtimes). The module name was never verified on Discovery, and a mismatched
+toolkit can shadow the bundled libraries. The launch README tells the owner to run
+`module avail cuda` only if the smoke probe fails with a CUDA library error.
+*Cost if wrong:* one module line added back after the first smoke probe.
+
+**T15. Probe meta is written before telemetry, and result files keep umask modes.**
+The telemetry file is the cache marker, but `run_probe` wrote it before the meta
+file, so a job killed between the two writes left telemetry without meta; every
+rerun hit the cache, never wrote meta, and T10 reported "missing meta" until a
+manual `--force`. Meta is now written first and telemetry last, so telemetry is
+the commit and an interrupted job retrains. Separately, `_write_json`'s temp file
+came from `mkstemp` with mode 0600, which `os.replace` kept, making every result
+owner-only; it is now chmodded to `0o666 & ~umask` before the rename, the mode a
+plain open would give.
+*Cost if wrong:* none to the protocol; both are write-path changes with tests.

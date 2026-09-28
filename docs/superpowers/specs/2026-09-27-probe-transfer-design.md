@@ -146,8 +146,9 @@ permutation p-value, leave-one-out. N = 10 for every statistic.
 | Leave-one-out transfer rho | as transfer rho, each model held out | No single model carries the result |
 
 Scores are `amenability_score` applied per suite across the ten roster models, so each
-suite's score vector is z-scored within that suite. Spearman is rank-based, so the
-per-suite z-scoring does not affect the transfer statistic.
+suite's score vector is z-scored within that suite. Because the zero-advantage gate
+multiplies the z-scores, the normalisation set can change ranks, so each pairwise
+statistic re-scores both arms over that pair's common models (transfer-rulings T8).
 
 ### Decision rule
 
