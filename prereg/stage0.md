@@ -43,6 +43,31 @@ property being relied on. The guarantee is procedural and auditable, not cryptog
 Anyone auditing this work should inspect the git history of `prereg/FROZEN.json` and
 confirm that the commit it names precedes the commits containing Stage 0 results.
 
+### Which files are covered
+
+The manifest covers the analysis DEFINITIONS only:
+
+- `src/amenability/scoring/score.py`
+- `src/amenability/scoring/baselines.py`
+- `src/amenability/scoring/gates.py`
+- `src/amenability/registry/models.yaml`
+- `prereg/stage0.md`
+
+It does NOT cover the orchestration and execution code, principally
+`scripts/run_stage0.py` and `scripts/real_runner.py`. Those files determine which
+checkpoints are probed, which suites are used, and how results are grouped before the
+gates see them, so they influence outcomes even though they compute no score themselves.
+They are deliberately left unfrozen because they are operational code that legitimately
+changes for logging, command-line arguments and defect fixes, and freezing them would
+create pressure to unfreeze casually, which would weaken the mechanism more than the
+residual risk it removes.
+
+The consequence is that an auditor must read the git history of the orchestration code
+alongside the manifest, not the manifest alone. Two specific properties worth checking
+there: that both pre-registered control bases were used, which `run_stage0.py` asserts at
+runtime, and that the probe and target suites remained disjoint, which the suite registry
+enforces by raising on any overlapping task identifier.
+
 ## Gate thresholds
 
 - **Gate A passes** when the score's ordering is correct within both control families
