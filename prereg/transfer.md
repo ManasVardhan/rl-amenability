@@ -5,6 +5,22 @@ belongs to Stage 0, and the product reframe (issue #34) replaces it with metric
 versioning. The git history of this file is the audit trail; the batch's telemetry
 commits must postdate the commit that adds this file.
 
+## Amendment of 2026-09-28
+
+Made on 2026-09-28, before any batch data existed, in response to the
+whole-branch review of the implementation. No model had been run on either
+suite. Four changes, each recorded as a ruling in
+`docs/decisions/transfer-rulings.md` (T7 to T10) and edited into the sections
+below:
+
+- The test-retest pair has the same completeness floor as the transfer pair (T7).
+- Every pairwise statistic re-normalises the score over that pair's common
+  models (T8).
+- A statistic whose input is constant is undefined, and an undefined transfer
+  or test-retest rho is its own inconclusive decision (T9).
+- Telemetry is validated against its meta file; a mismatch is a named job
+  failure (T10).
+
 ## Question
 
 Q1, probe invariance: does a model's probe score depend on which probe suite
@@ -18,6 +34,19 @@ replicate on Countdown. No ground truth is involved.
   three buckets, pass@k at (1, 8, 32, 64) from 64 samples.
 - Score: `amenability_score` from `src/amenability/scoring/score.py`, applied per
   suite across the ten roster models.
+- Common-set scoring (amended, T8): the score is relative to the roster it is
+  computed over, and its zero-advantage gate means a change of roster can change
+  the ranks, not only the scale. So for each pairwise statistic, the transfer rho
+  (Countdown s0 against Graph s0) and the test-retest rho (Countdown s0 against
+  Countdown s1), each arm is scored separately over the models present in BOTH
+  arms of that pair, and those two vectors are correlated. Per-feature rhos use
+  raw features and only need the same pairing. The leaderboard preview keeps
+  per-arm scores over each arm's full scored set and says so.
+- Accepted telemetry (amended, T10): a job's telemetry counts only if its meta
+  file exists and records learning_rate, probe_steps and item seed equal to the
+  protocol above (`ProbeConfig()` defaults, item seed 0) and a number of step
+  records equal to probe_steps. A missing, unreadable or mismatched meta makes
+  the job a named failure, like a missing telemetry file.
 - Items: generated from item seed 0 for every arm. Run seed 0 for the two suite
   arms, run seed 1 for the Countdown replicate.
 - Statistics: `spearman_with_ci` (percentile bootstrap, permutation p, 10,000
@@ -52,13 +81,17 @@ Evaluated in this order; the first matching row is the decision.
 | Condition | Decision |
 |---|---|
 | Fewer than 8 of 10 models have both seed-0 arms scored | INCONCLUSIVE_INCOMPLETE: rerun failures |
+| Fewer than 8 of 10 models have both Countdown arms (s0 and s1) scored (amended, T7) | INCONCLUSIVE_INCOMPLETE: rerun failures |
+| Transfer rho or test-retest rho undefined because one of its input vectors is constant (amended, T9) | INCONCLUSIVE_DEGENERATE: the statistic carries no information; report which, do not read it as rho 0 |
 | Test-retest rho < 0.5 | INCONCLUSIVE_RELIABILITY: the probe is too noisy at N=10; change the protocol, do not read the transfer rho |
 | Transfer rho >= 0.7 and permutation p < 0.05 | INVARIANT: single score defensible; Stage 0 proceeds as designed |
 | Transfer rho >= 0.4 | PARTIAL: composite plus per-domain columns; Stage 0 proceeds |
 | Otherwise | DOMAIN_SPECIFIC: per-domain product; #28 and Stage 0 re-planned per domain before further GPU spend |
 
 The transfer rho is always reported beside the test-retest rho, never bare. No
-rho is computed on a subset of models without its N printed beside it.
+rho is computed on a subset of models without its N printed beside it. A
+statistic with a constant input is printed as "undefined (constant input)" with
+its N, never as 0.
 
 A no-breadth exclusion: a model whose pre-probe pass@32 equals its pass@1 on a
 suite has no conversion ratio (`extract_features` raises). It is excluded from
@@ -79,5 +112,6 @@ batch is seen. No other protocol parameter changes.
 - No choosing between Countdown and Graph as "the" probe by which gives the nicer
   leaderboard.
 - No dropping a model from the analysis except for a named, documented job failure
-  or a documented no-breadth exclusion, both listed in the report.
+  (including a meta mismatch, T10) or a documented no-breadth exclusion, both
+  listed in the report.
 - No reading the transfer rho without the test-retest rho beside it.

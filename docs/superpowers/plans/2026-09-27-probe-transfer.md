@@ -2373,7 +2373,7 @@ This task is a procedure, not code. Each step's output goes into the tree or int
 ```bash
 git pull
 uv sync --extra dev --extra gpu
-uv run pytest -q -m "not gpu"       # 227 passed expected
+uv run pytest -q -m "not gpu"       # 254 passed expected
 ```
 
 - [ ] **Step 2: Prefetch (resolves #20)**
@@ -2391,7 +2391,7 @@ Follow README step 2. When all 20 `preeval/*.json` exist, run:
 uv run python -m scripts.analyze_transfer --work-dir results/transfer
 ```
 
-Read the calibration table. Acceptance, per (model, suite): `floored` is False and `saturated` is False, and Graph is not `breadth_saturated` for 3 or more models.
+Read the calibration table. Acceptance: Countdown is not `floored` for any model; Graph is `floored` for at most 2 models; Graph is `breadth_saturated` for at most 2 models; and no (model, suite) is `saturated` (no bullet below covers that case, so a saturated row is a STOP-and-report). Each bullet says what happens when a condition fails.
 
 - If Countdown is floored for any model: #21's concern is real. STOP and report; the fix is a bucket change in `countdown.py` and a ruling, and both suites' pilot must be rerun for that suite.
 - If Graph is floored for 3 or more models: apply the bound contingency from spec section 4, buckets `(7, 9, 11)`, as the next free T number in `docs/decisions/transfer-rulings.md`, rerun `test_graphpath.py` (the guessability test must still pass), and rerun the Graph pilot with `--force`.
@@ -2406,7 +2406,7 @@ Follow README step 3. Then read `results/transfer/meta/smollm2-1.7b-countdown-gr
 
 Checks:
 1. Both jobs completed with 60 step records and no `Traceback` in their logs. If the SmolLM2 job died at post-eval with a CUDA OOM: #33's fix is insufficient in practice. STOP and report; the contingency is to run pre-eval, training and post-eval as three subprocesses inside `run_probe`, recorded as a ruling.
-2. `peak_memory_bytes` for SmolLM2-1.7B. If above 36e9: the batch needs 80 GB nodes; add `--constraint=<feature from H1>` to the batch launch. Record which in the tracking issue.
+2. `peak_train_bytes` for SmolLM2-1.7B (the training peak alone; the counter is reset before training, transfer-rulings T11). If above 36e9: the batch needs 80 GB nodes; add `--constraint=<feature from H1>` to the batch launch. Record which in the tracking issue.
 3. `wall_seconds` total per job. Multiply by 30 for the batch estimate. If a job took more than 2 hours, STOP and report before launching the batch.
 4. Qwen2.5-0.5B: `post.ks[1] > pre.ks[1]` in its telemetry. If not, spec section 8 applies: run
    ```bash
@@ -2415,7 +2415,7 @@ Checks:
    ```
    (as two array tasks or two `srun`s), pin the smallest lr showing gain by changing `ProbeConfig.learning_rate`'s default AND `RealRunner`'s expectations AND `prereg/stage0.md`'s "Fixed quantities" line, record a ruling as the next free T number in `docs/decisions/transfer-rulings.md` with the three measured gains, rerun the seed-0 Countdown smoke for both models with `--force`, and only then continue.
 
-Close #33 with the SmolLM2 meta file's numbers as evidence.
+Close #33 with the SmolLM2 meta file's numbers as evidence, citing `allocated_after_train_bytes` (what is still allocated when training returns, which shows the trainer was released before post-eval) beside `peak_train_bytes`.
 
 - [ ] **Step 5: STOP: batch approval**
 
@@ -2452,6 +2452,6 @@ Per `prereg/transfer.md`:
 
 **Review Focus coverage.** 1 -> `test_verifier_takes_the_last_answer_block_and_tolerates_whitespace`, `test_verifier_rejects_unparseable_and_lowercase`. 2 -> `test_no_breadth_exclusion_reduces_n_and_is_named`. 3 -> `test_load_arm_reports_missing_and_unreadable_files`, `test_three_missing_graph_jobs_are_inconclusive_and_named`. 4 -> `test_cache_is_keyed_by_suite_and_seed`. 5 -> `test_run_seed_changes_the_trainer_seed_but_not_the_items`. 6 -> `test_unknown_model_fails_before_any_gpu_work`.
 
-**Test count.** 177 + 2 (T1) + 10 (T2) + 3 (T3) + 11 (T4) + 5 (T5) + 8 (T6) + 11 (T9) = 227 expected at the end of Task 9. Update the README's test count then.
+**Test count.** 177 + 2 (T1) + 10 (T2) + 3 (T3) + 11 (T4) + 5 (T5) + 8 (T6) + 11 (T9) = 227 expected at the end of Task 9. Update the README's test count then. The final whole-branch fix wave (transfer-rulings T7 to T11) brings it to 254.
 
 **Execution model, per the owner.** Planning is done here; every line of code in this plan is written by Opus 5.5 subagents under `superpowers:subagent-driven-development`, one implementer and one reviewer per task, then a whole-branch review. The implementer for each task reads only that task plus the Global Constraints and the spec.

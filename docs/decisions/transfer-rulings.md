@@ -83,3 +83,83 @@ lives in the CLI rather than in the cache key so that `run_probe`'s key and Stag
 batch directory is still unguarded. After an lr recalibration (spec section 8),
 the old telemetry in `results/transfer` is stale and must be rerun with `--force`,
 which Task 10 step 4 of the plan already requires.
+
+The rulings T7 to T11 were made on 2026-09-28 in response to the whole-branch
+review, before any batch data existed. T7 to T10 amend `prereg/transfer.md`.
+
+**T7. The test-retest pair has the same completeness floor as the transfer pair.**
+The decision rule gated only the two seed-0 arms at 8 of 10 models. The Countdown
+replicate had no floor, so a batch in which only three seed-1 jobs finished would
+still produce a test-retest rho, and that rho would be allowed to pass the model
+into a transfer verdict. A reliability ceiling measured on three models means
+nothing. `transfer_stats` now reports `n_retest`, the number of models with a
+score in both Countdown s0 and s1 after failures and no-breadth exclusions, and
+`decide` returns INCONCLUSIVE_INCOMPLETE when either count is below 8. The
+completeness checks run first, before any statistic is read.
+*Cost if wrong:* a batch with seven good replicates is inconclusive and needs its
+failed replicates rerun, at about 1 GPU-hour each.
+
+**T8. Each pairwise statistic re-normalises the score over that pair's common
+models.**
+`amenability_score` is relative to the roster it is computed over (z-scores of
+conversion and retention, then a zero-advantage gate). The analysis scored each
+arm over whatever loaded in that arm, then correlated the overlap. If a model
+failed on Graph only, Countdown was z-scored over ten models and Graph over nine,
+and because the gate multiplies the z-scores, a different roster can change the
+ranks, not only the scale. The rank comparison would then mix a roster effect
+into the answer. The spec's claim that per-suite z-scoring cannot affect a
+Spearman statistic holds only without the gate. So for the transfer rho and the
+test-retest rho, each arm is now scored separately over the models present in
+both arms of that pair, and those vectors are correlated. Per-feature rhos use
+raw features and only need the same pairing. A test builds two work directories,
+one with a model missing from one arm and one with it removed from every arm, and
+requires identical transfer statistics; it failed before the change (rho -0.117
+against 0.100). The leaderboard preview keeps per-arm scores over each arm's full
+scored set, and is labelled to say so.
+*Cost if wrong:* the leaderboard and the statistics use different normalisation
+sets. Both are labelled, so the difference is visible rather than hidden.
+
+**T9. A statistic whose input is constant is undefined, not rho 0.**
+The shared statistics helper maps a NaN Spearman to 0.0. For a constant input
+vector, for example every model scoring identically on one suite, that turns "no
+information" into a transfer rho of 0, which the rule would read as
+DOMAIN_SPECIFIC, or into a test-retest rho of 0, read as a reliability failure.
+Both are real-sounding conclusions drawn from nothing. `correlate` now returns an
+undefined marker when either paired vector has zero range; the report prints
+"undefined (constant input), n=..." for it, including for per-feature and static
+rows, and `decide` maps an undefined transfer or test-retest rho to a new
+decision, INCONCLUSIVE_DEGENERATE, checked after completeness. The shared helper
+in `eval/stats.py` is not changed, because Stage 0 depends on it.
+*Cost if wrong:* one more decision class in the pre-registration.
+
+**T10. Telemetry is validated against its meta file.**
+The telemetry cache key is (model, suite, run seed) and ignores learning rate,
+probe steps and item seed. T6 guards the CLI, but nothing guarded the analysis: a
+direct library call with a custom config, or the stale 1e-6 telemetry left in the
+batch directory after an lr recalibration, would be scored as if it were the
+protocol run. `load_arm` now reads each job's meta file and treats the job as a
+named failure when the meta is missing or unreadable, when its learning_rate,
+probe_steps or item_seed differs from `ProbeConfig()`'s defaults and item seed 0,
+or when its number of step records differs from probe_steps. The failure message
+names the field and both values.
+*Cost if wrong:* after a legitimate lr recalibration the analysis accepts only
+telemetry at the recalibrated `ProbeConfig` default, which is exactly what spec
+section 8 already pins, so old runs must be rerun with `--force`.
+
+**T11. Three hardening fixes on the batch's critical path.**
+First, `run_probe` writes telemetry, meta and pre-eval files to a temporary file
+in the same directory and renames it over the target, so a job killed by walltime
+or quota mid-write leaves the previous file or nothing, never a truncated file
+that a later run would reuse from the cache. Second, before training the CUDA
+peak-memory counter is reset, and the meta records `peak_train_bytes` (the
+training peak alone) and `allocated_after_train_bytes` (what is still allocated
+when training returns, which is the evidence for #33's trainer release);
+`peak_memory_bytes` stays the whole job's peak. Without a GPU all three are null.
+Third, the prefetch now requires at least one `*.safetensors` file in each
+snapshot and, where `model.safetensors.index.json` exists, every shard it names,
+because a config and tokenizer load fine from a snapshot whose weights never
+arrived, and that failure would otherwise first appear on a GPU node. The review
+also asked for report wording: the leave-one-out row prints its N, the static
+comparator row says it is descriptive and includes breadth-excluded models, and
+the leaderboard gains a pre-probe breadth column per suite.
+*Cost if wrong:* a slightly larger fix wave before the batch; no protocol change.
