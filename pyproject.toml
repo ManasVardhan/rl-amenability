@@ -16,6 +16,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-mock>=3.14"]
 gpu = ["vllm>=0.10"]
+# The Modal client belongs on the SUBMITTING machine, not in the GPU image: the
+# image is built by Modal from scripts/modal_app.py and never imports modal itself.
+# Kept out of "dev" so the CPU test suite does not depend on it.
+launch = ["modal>=1.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -86,4 +86,7 @@ uv run pytest -v -m "not gpu"     # full CPU suite
 uv run pytest -v -m gpu           # needs a GPU; add --extra gpu to sync
 ```
 
-`vllm` lives in the `gpu` extra so the CPU suite installs on any platform.
+`vllm` lives in the `gpu` extra so the CPU suite installs on any platform. The
+Modal client lives in a separate `launch` extra, because it belongs on the machine
+that submits the job rather than in the GPU image: `uv sync --extra launch` before
+`modal run scripts/modal_app.py::stage0`.

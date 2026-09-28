@@ -165,3 +165,239 @@ it silently leaves the model in eval mode and disables dropout for every
 subsequent training step. A measurement instrument corrupting the run it
 measures, invisibly.
 *Cost if wrong:* four extra tests using fakes.
+
+## Task 9: GRPO probe runner
+
+**R17. Add a run manifest to `run_grpo`.**
+This fixes two findings at once. Review found `checkpoint_schedule` was dead
+code, never called from anywhere including all downstream task briefs.
+Separately, the plan's own Global Constraints say "Every run is seeded and every
+seed is recorded in the run manifest. Reproducibility is a release artifact" and
+NO task implements a run manifest. That is a spec requirement with no
+implementing task, which the plan self-review was supposed to catch and did not.
+Writing a manifest from `run_grpo` satisfies the constraint and gives
+`checkpoint_schedule` a real consumer, so the function stops being decorative.
+*Cost if wrong:* one small JSON per run, which the spec already asked for.
+
+**R18. Close the LoRA guard gap with a post-construction assertion.**
+The guard is airtight only against `run_grpo(spec, peft_config=...)` and is
+bypassed entirely by a caller-supplied `trainer_factory`, since TRL's
+`GRPOTrainer` accepts `peft_config` itself. Full-parameter-only is a research
+requirement, not a style preference: LoRA constrains how far weights can move
+and that is the measured quantity. Asserting after construction that the model
+is not PEFT-wrapped covers both paths.
+*Cost if wrong:* a legitimate PEFT experiment would have to remove the
+assertion, which is the intended friction.
+
+**R19. Guard duplicate prompt text in `build_reward_fn`.**
+Same class as R11 but a different collision axis: prompt text, not task_id.
+Confirmed reachable in `generate_countdown`, which draws numbers with no
+collision check, though harmless there because the answer is a pure function of
+the prompt. Nothing stops a future suite from producing identical prompts with
+different answers, where rollouts would be silently mis-scored.
+*Cost if wrong:* a suite with genuinely duplicate prompts must deduplicate
+before training.
+
+**R20. Add a batch-level match-rate guard.**
+If NO prompt in a reward call matches a known item, raise. This is the one that
+would have saved a whole run: a systemic prompt mismatch (templating,
+whitespace, a prompt-format change) would otherwise score every completion 0.0,
+and the run would complete and report a clean zero-amenability result rather
+than an error. A single unmatched prompt still scores 0.0; only a total miss
+raises. TRL was verified to pass raw prompts so this should never fire, which is
+precisely why it is cheap insurance.
+*Cost if wrong:* a legitimate all-unmatched batch raises instead of scoring
+zero, which is the intended behaviour.
+
+**R21. Accept the implementer's deviation on the match-rate guard's condition.**
+The original instruction was self-contradictory and the implementer was right to
+flag it rather than pick a side silently. Their resolution changes the condition
+to `len(prompts) > 1`, so a genuine multi-completion batch with zero matches
+raises while the single-unknown-prompt contract is preserved. That is sound:
+GRPO batches are always a multiple of `num_generations` and group-relative
+advantage is undefined for a group of one, so a real batch is never size 1. The
+guard still fires on every realistic systemic-mismatch scenario, which is the
+failure mode R20 exists to catch.
+*Cost if wrong:* a size-1 batch with an unknown prompt scores 0.0 instead of
+raising, which is unreachable in GRPO.
+
+## Task 10: SFT runner
+
+**R22. Extend R18 to the SFT arm.**
+`sft.py` carried the same LoRA bypass gap that R18 fixed in `grpo.py`: it checked
+only the `peft_config` parameter, with no post-construction
+`hasattr(model, "peft_config")` check. Since `run_sft` calls `trainer_factory()`
+with no arguments, an injected factory fully controls construction and TRL's
+`SFTTrainer` accepts `peft_config` directly. The post-construction PEFT check
+must exist in both training runners or full-parameter-only is enforced on the RL
+arm and merely advisory on the SFT arm, which would be an incoherent invariant
+for a benchmark whose entire premise is measuring how far weights move.
+*Cost if wrong:* the same intended friction as R18, now on both arms.
+
+## Task 11: amenability score
+
+**R23. Reject non-finite telemetry at the feature boundary.**
+`extract_features` already raises on empty steps per R14; it must equally raise
+when any step carries a non-finite entropy, kl, grad_norm or reward, naming the
+model and step. This is the root cause and the only place the diagnosis is
+legible. Guarding inputs is NOT tuning the pre-registered formula: the formula
+assumes finite inputs and the `max(0.0, -entropy_slope)` expression itself is
+untouched.
+*Cost if wrong:* a diverged run raises instead of silently scoring 1.0
+retention, which is the entire point.
+
+**R24. Add defence in depth at the score boundary.**
+`amenability_score` raises if any of the three scoring inputs is non-finite. Two
+independent guards are justified because this is the number the paper reports and
+the failure is silent in the favourable direction. This crosses a task boundary:
+`telemetry.py` is Task 6's deliverable and Task 6 is closed. Fixing it inside
+Task 11's fix round is deliberate, because respecting task boundaries at the cost
+of leaving a known silent mis-scoring in the tree would be the wrong trade. Both
+files are still pre-freeze, so this is the correct and last window for the change.
+*Cost if wrong:* one redundant guard on a code path that should already be clean.
+
+**R25. Do NOT clamp `naive_extrapolation` to [0,1]; document the overshoot in the
+pre-registration instead.**
+Clamping looks like obvious hygiene and would actively bias the research result
+in this work's favour. The baseline is only ever compared to the score by RANK,
+through Spearman, so an overshoot to 1.0076 preserves ordering and costs nothing.
+Clamping, by contrast, would saturate several models at exactly 1.0, create
+artificial ties, and destroy the baseline's ability to discriminate between them.
+A weaker baseline makes the score look better by comparison. Leaving the
+overshoot is the honest choice, and it is only safe to leave because the consumer
+is rank-based; if any later analysis compares these values as magnitudes rather
+than ranks, this decision must be revisited.
+*Cost if wrong:* a baseline value outside the nominal accuracy range appears in
+the results table and needs a footnote.
+
+## Task 13: bootstrap statistics
+
+**R26. Guard degenerate residuals in `partial_spearman`.**
+If either residual array has a standard deviation below 1e-9, return 0.0. Rank
+values are O(n) so genuine residual variation is many orders of magnitude above
+that, while the degenerate case sits at 1e-15. Verified: the guard returns 0.0
+for the fully-explained case and leaves legitimate cases untouched.
+*Cost if wrong:* a genuine association whose residuals are pathologically small
+reports no association.
+
+**R27. Replace the degenerate partial-correlation test with three that actually
+exercise the property.**
+Use seeded independent perturbations rather than a self-comparison. Verified
+numerically: a shared driver gives raw rho 0.877 collapsing to partial -0.178; a
+genuine association with an unrelated control gives raw 0.990 and partial 0.990,
+correctly preserved; and the fully-explained case returns 0.0 under the R26
+guard. The original test could not demonstrate the property at all, because after
+residualising a self-comparison both sides are the same numerical noise.
+*Cost if wrong:* two extra tests.
+
+## Task 14: freeze mechanism
+
+**R28. Accept the implementer's `pyproject.toml` change, `pythonpath = ["src", "."]`.**
+It was necessary, not cosmetic. The plan's pyproject set `pythonpath = ["src"]`
+only, but `prereg/` sits at the repository root rather than under `src`, so
+`import prereg` failed with ModuleNotFoundError even with a correct
+implementation. Another cross-task edit (`pyproject.toml` is Task 1's
+deliverable) and another gap the plan self-review missed: a package was specified
+whose location was incompatible with the path configuration already specified.
+The change is one line and additive, so it cannot break the existing src-based
+imports.
+*Cost if wrong:* the repository root is importable in tests, which is standard
+for a project with root-level tooling packages.
+
+**R29. Record the git HEAD commit SHA in the freeze manifest.**
+This makes the code honour a commitment `prereg/stage0.md` already makes in
+prose, and it is the difference between a pre-registration that can be checked
+and one that must be trusted. With the SHA recorded, the paper cites exactly what
+the tooling captured and any reader can verify that commit precedes the data
+commits in history. Must degrade gracefully when git is unavailable rather than
+failing the freeze.
+*Cost if wrong:* one extra field in a JSON file, and a subprocess call at freeze
+time.
+
+**R30. Disclose the freeze mechanism's actual guarantee in `prereg/stage0.md`.**
+The document did not state the mechanism's limits. This matters for research
+integrity rather than for code: describing a same-repo, unsigned hash manifest as
+a "hash-frozen pre-registration" without qualification would oversell it, since
+anyone who can edit `score.py` can delete `FROZEN.json` and re-freeze. The honest
+framing is that it prevents accidental and incremental drift, and creates a
+git-visible audit trail, but provides no cryptographic guarantee against a
+determined operator. Stating that plainly costs nothing and is the difference
+between a credible methods section and an overclaim a reviewer will catch.
+*Cost if wrong:* a paragraph acknowledging a limitation that is obvious to anyone
+who reads the code anyway.
+
+## Task 15: gates
+
+**R31. Change Gate A's pooling to within-family ranks. SUPERSEDED by R34.**
+Raw pooling was PROVEN to fail on a correct result: two correctly ordered
+families occupying disjoint score levels gave pooled rho 0.478 against a 0.7
+threshold. The change was made to match the intent the code comment already
+documented. Justification, stated carefully because this modifies a
+pre-registered criterion: (a) the file was NOT yet frozen, which is exactly the
+window in which such a change is legitimate, and the last one; (b) it makes the
+implementation match its own documented intent, written before any results
+existed, so it is not a new criterion; (c) NO ground-truth data exists anywhere
+in this project, so this cannot be results-driven tuning, which is the specific
+harm pre-registration guards against; (d) the alternative is shipping a primary
+gate already proven to fail on correct results in the most likely scenario and
+disclosing that as a known likely failure, which is worse.
+
+The honest consequence, disclosed rather than hidden: under within-family RANK
+pooling with two equal-size families of three checkpoints, a correct ordering
+always yields rho = 1.0, so the pooled-rho condition becomes largely redundant
+with the ordering check rather than independent evidence. That defect is what R34
+fixes.
+*Cost if wrong:* Gate A becomes insensitive to systematic cross-family
+disagreement in score level, which raw pooling would have caught. A real loss,
+but not what Gate A was designed to test, and recoverable since Stage 0
+telemetry is retained.
+
+**R34. Pool within-family CENTRED scores rather than within-family RANKS.
+Supersedes R31's mechanism, not its reasoning.**
+Adopted from the final whole-branch review, whose fix is better than R31's.
+Measured: ranking returns 1.000 for every correct case, which makes the
+pre-registered rho threshold vacuous and collapses the conjunction to a single
+criterion, a loosening in the hypothesis's favour. Mean-centring fixes the
+family-offset defect equally well (0.956 against the broken 0.478) while
+preserving graded information, so a compressed family drops to 0.837 and an
+inverted family falls far below the threshold. Both conditions of the conjunction
+stay meaningful. R31's rank-based fix solved the defect but damaged the gate;
+centring solves it without that cost. R31's legitimacy argument (pre-freeze, no
+ground-truth data anywhere, matching documented intent) applies unchanged.
+*Cost if wrong:* rho now varies with score spacing, so a genuinely correct but
+very unevenly spaced result sits closer to the threshold.
+
+## Task 17: Stage 0 orchestration
+
+**R32. Assert BOTH pre-registered control bases are present.**
+Carried to Task 17 rather than a Task 16 fix round. Nothing prevented
+`variant_plan` being called with a single base, so a partial single-family
+invocation could be silently mistaken for full primary-claim evidence. That
+matters because the whole reason for two families is to rule out the objection
+that entropy collapse is a Qwen-specific artifact, which the Spurious Rewards
+literature makes a live concern. The guard belongs in the consumer, Task 17's
+`run_stage0`, not in the plan function whose flexibility the unit tests
+legitimately use. Landing it in Task 17's dispatch is cheaper than a fix round
+and puts it where the pipeline actually decides what counts as a primary-claim
+run.
+*Cost if wrong:* `run_stage0` refuses to proceed with a deliberately reduced
+control arm, which would then require an explicit code change rather than
+passing silently.
+
+## Task 18: launch paths
+
+**R33. Document the frozen/unfrozen boundary in `prereg/stage0.md` rather than
+expanding `FROZEN_PATHS`.**
+`run_stage0.py` contains the gate wiring and family grouping yet is not frozen,
+so editing it after the freeze would be undetectable. Adding it, and Task 18's
+`real_runner.py`, to `FROZEN_PATHS` was considered and rejected: the orchestrator
+and runner are operational plumbing that will legitimately need changes for
+logging, CLI arguments and bug fixes, and freezing them would create steady
+pressure to unfreeze casually, which corrodes the mechanism's meaning far more
+than the residual risk. What the freeze must protect is the analysis DEFINITIONS
+(score, baselines, gates, roster, plan), and those are covered. The honest
+response is the same as R30's: state the boundary precisely rather than let a
+reader assume the freeze covers everything, and tell an auditor to review the
+orchestrator's git history alongside the manifest.
+*Cost if wrong:* an undetected post-freeze orchestrator edit remains possible,
+mitigated by disclosure and by git history being the audit trail.

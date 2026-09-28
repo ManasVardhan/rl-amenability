@@ -72,6 +72,27 @@ enforces by raising on any overlapping task identifier.
 
 - **Gate A passes** when the score's ordering is correct within both control families
   AND pooled Spearman rho between score and known ordering is >= 0.7.
+
+  How the pooling works, because this is a load-bearing methodological choice.
+  Scores are pooled across families only AFTER within-family MEAN-CENTRING: each
+  family's scores have that family's mean subtracted before the two families are
+  concatenated and the single pooled rho is computed. Centring is necessary because
+  `amenability_score` z-scores across the whole roster, so two families can separate
+  in absolute score level; pooling raw scores would let family membership dominate
+  the pooled statistic and fail this gate on a result whose ordering is perfectly
+  correct within each family. Verified: correctly ordered families occupying disjoint
+  score ranges give pooled rho 0.478 under raw pooling and 0.956 under centred
+  pooling.
+
+  The BINDING condition is the within-family ordering check. The pooled rho is a
+  graded SECONDARY statistic, and centring is what keeps it informative: within-family
+  ranking would also remove the family offset, but it would force rho to exactly 1.0
+  for any correct ordering, making the 0.7 threshold vacuous and collapsing the
+  conjunction to a single criterion. Under centred pooling, rho still varies with
+  within-family spacing, so a correct but compressed ordering measures lower (0.837 in
+  a verified case) and can in principle fail a higher threshold. Consequence to state
+  plainly: because rho retains spacing information, it is sensitive to how unevenly
+  the checkpoints are spaced and not only to whether they are ordered correctly.
 - **Gate B passes** when `|rho(score, outcome)| > |rho(naive_extrapolation, outcome)|`
   on the six control checkpoints.
 
@@ -114,15 +135,31 @@ now prevents them being presented later as post-hoc discoveries.
 
 ### Retention factor saturation
 
-`kl_per_gain` divides total KL by `max(reward_gain, 1e-6)`. The floor means any probe
-whose reward did not increase produces a very large `kl_per_gain` and therefore a
-`retention_factor` near zero. Two consequences:
+`kl_per_gain` divides total KL by `max(reward_gain, 1e-6)`. `reward_gain` is
+`rewards[-1] - rewards[0]` over the RECORDED step trace, so the floor engages for any
+probe whose FINAL recorded reward does not exceed its first. That is the precise
+condition: it is a property of the first and last recorded steps, not of the trace's
+overall trend. Where the floor engages, `kl_per_gain` becomes very large and
+`retention_factor` collapses toward zero. Two consequences:
 
 - A small reward decline and a large reward decline are indistinguishable in
   `retention_factor`; both saturate near zero.
 - A perfectly FLAT reward trace also saturates, not only a declining one. Verified: a
   healthy run with flat reward and stable entropy yields a retention factor of about
   2e-5.
+
+A defect that made this condition apply UNIVERSALLY was found and fixed before the
+freeze, and is recorded here because it changes how this section should be read.
+`transformers`' `Trainer._finalize_training` calls `self.log(metrics)` after training
+ends, which fired the telemetry callback one extra time with no preceding reward pass
+and appended a spurious final step whose `mean_reward` was 0.0. That phantom step made
+`rewards[-1] - rewards[0]` negative for every probe, so the floor engaged and
+`retention_factor` collapsed for every variant regardless of its real reward trace. The
+callback now skips a log that carries no training-step rewards, distinguished by whether
+any rewards were actually buffered rather than by whether the mean is zero, since a
+legitimate step can score every completion 0.0. Without that fix the saturation
+described here would not have been a limitation affecting some runs; it would have
+silently affected all of them.
 
 This matters for Gate A, because heavily over-SFT'd control variants are the ones most
 likely to show flat or declining probe reward, and the score's ability to rank them then
@@ -152,6 +189,23 @@ baseline's ability to discriminate. A weakened baseline would make the score loo
 by comparison, biasing the comparison in this work's favour. This decision is safe ONLY
 because the consumer is rank-based; if any later analysis compares these values as
 magnitudes, it must be revisited.
+
+### Batching is by sequences, not tokens
+
+The design spec asks for batches "sized by tokens, not sequences, for tokenizer
+comparability". TRL's `GRPOConfig` offers no token-based batching, and building it was
+judged out of scope before any run. The batch shape is therefore PINNED by sequence
+count instead: `per_device_train_batch_size = num_generations`, so one device batch holds
+exactly one prompt's completion group, and `gradient_accumulation_steps = 4`
+(`PROMPTS_PER_STEP`), so four groups are accumulated per optimiser step. Leaving these
+unset, as the code originally did, means TRL's defaults apply and the effective protocol
+silently depends on the number of processes; pinning them makes the protocol identical
+across models and machines. Every run records the shape it used in its run manifest.
+
+The deviation's cost is the one the spec's wording anticipated: models whose tokenizers
+differ in average tokens per completion see different token counts per optimiser step, so
+the comparison across tokenizers is not token-normalised. This is a stated limitation of
+Stage 0, not a silent choice, and it must be reported as such.
 
 ### Confidence intervals are percentile, not BCa
 
