@@ -8,3 +8,5 @@ results/**/checkpoints/
 *.bin
 .DS_Store
 .superpowers/
+results/**/probes/
+logs/
