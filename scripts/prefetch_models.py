@@ -1,4 +1,4 @@
-"""Download every roster model once and confirm transformers can load its config.
+"""Download every roster model once; confirm its config, tokenizer and weights are there.
 
 Run on a CPU node before the GPU array so thirty array tasks do not each download
 the same weights, and so a gated or missing repository (#20) fails here, in one
@@ -23,11 +23,30 @@ def _default_download(repo_id: str, **kw) -> str:
     )
 
 
+def _check_weights(path: str) -> None:
+    """Raise unless the snapshot holds safetensors weights and every indexed shard.
+
+    A config and tokenizer load fine from a snapshot whose weights never arrived
+    (an interrupted download, or a repo that ships only .bin files, which the
+    allow-list skips); without this check that failure would surface on the GPU.
+    """
+    root = Path(path)
+    if not any(root.glob("*.safetensors")):
+        raise FileNotFoundError(f"no *.safetensors weights in {root}")
+    index = root / "model.safetensors.index.json"
+    if index.exists():
+        shards = sorted(set(json.loads(index.read_text())["weight_map"].values()))
+        missing = [s for s in shards if not (root / s).exists()]
+        if missing:
+            raise FileNotFoundError(f"shards named in {index.name} missing from {root}: {', '.join(missing)}")
+
+
 def _default_check_config(path: str) -> None:
     from transformers import AutoConfig, AutoTokenizer
 
     AutoConfig.from_pretrained(path)
     AutoTokenizer.from_pretrained(path)
+    _check_weights(path)
 
 
 def prefetch(registry: dict, download=_default_download, check_config=_default_check_config) -> list[dict]:

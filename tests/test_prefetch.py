@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from scripts.prefetch_models import main, prefetch
+from scripts.prefetch_models import _check_weights, _default_check_config, main, prefetch
 
 
 class _Spec:
@@ -43,3 +43,60 @@ def test_cli_exits_nonzero_when_any_model_failed(tmp_path, monkeypatch):
              check_config=lambda p: None)
     assert e.value.code == 1
     assert json.loads(out.read_text())[0]["ok"] is False
+
+
+def test_check_weights_requires_a_safetensors_file(tmp_path):
+    (tmp_path / "config.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match=r"no \*\.safetensors"):
+        _check_weights(str(tmp_path))
+
+
+def test_check_weights_requires_every_indexed_shard(tmp_path):
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(b"w")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {
+        "a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}))
+    with pytest.raises(FileNotFoundError, match="model-00002-of-00002.safetensors"):
+        _check_weights(str(tmp_path))
+
+
+def test_check_weights_accepts_a_complete_snapshot(tmp_path):
+    for name in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
+        (tmp_path / name).write_bytes(b"w")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {
+        "a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}))
+    _check_weights(str(tmp_path))
+    single = tmp_path / "single"
+    single.mkdir()
+    (single / "model.safetensors").write_bytes(b"w")
+    _check_weights(str(single))
+
+
+def _stub_transformers(monkeypatch):
+    import transformers
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda path: None)
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda path: None)
+
+
+def test_prefetch_row_fails_when_the_snapshot_has_no_weights(tmp_path, monkeypatch):
+    _stub_transformers(monkeypatch)
+    rows = prefetch({"m": _Spec("m", "org/m")}, download=lambda repo_id, **kw: str(tmp_path),
+                    check_config=_default_check_config)
+    assert rows[0]["ok"] is False and "no *.safetensors" in rows[0]["error"]
+
+
+def test_prefetch_row_fails_when_an_indexed_shard_is_missing(tmp_path, monkeypatch):
+    _stub_transformers(monkeypatch)
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(b"w")
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {
+        "a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}))
+    rows = prefetch({"m": _Spec("m", "org/m")}, download=lambda repo_id, **kw: str(tmp_path),
+                    check_config=_default_check_config)
+    assert rows[0]["ok"] is False and "model-00002-of-00002.safetensors" in rows[0]["error"]
+
+
+def test_prefetch_row_ok_for_a_complete_snapshot(tmp_path, monkeypatch):
+    _stub_transformers(monkeypatch)
+    (tmp_path / "model.safetensors").write_bytes(b"w")
+    rows = prefetch({"m": _Spec("m", "org/m")}, download=lambda repo_id, **kw: str(tmp_path),
+                    check_config=_default_check_config)
+    assert rows[0]["ok"] is True
