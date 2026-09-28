@@ -122,8 +122,9 @@ uppercase letters, so it is tokenizer-fair. Difficulty is controlled by node cou
   covers edge-blind guessing only: a random walk along the listed edges saturates
   pass@32 (see `docs/decisions/transfer-rulings.md`, T4).
 - **Registry.** Suite name `probe_graphpath`, task IDs `probe/graphpath/{seed}/{idx}`.
-  Registered in the same `SuiteRegistry` as `probe_countdown` and `target_gsm8k`, so
-  disjointness is enforced by the existing mechanism.
+  The suite's tests register it in a `SuiteRegistry` alongside `probe_countdown`. On
+  the transfer path, disjointness is structural, not checked at runtime (see
+  `docs/decisions/transfer-rulings.md`, T5).
 
 ## 5. Analysis and the pre-registered decision rule
 

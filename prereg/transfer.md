@@ -40,6 +40,11 @@ is saturated in 3 or more models, the batch stops before launch for a ruling
 (see `docs/decisions/transfer-rulings.md`, T4). This is decided before any model
 has run.
 
+Bucket changes decided at the calibration pilot (Countdown floored, the Graph
+(7, 9, 11) contingency, or a Graph breadth-saturation remedy) are pre-batch
+calibration. Each is recorded as a ruling before the batch launches, and none is
+a protocol change after data.
+
 ## Decision rule
 
 Evaluated in this order; the first matching row is the decision.
@@ -52,7 +57,12 @@ Evaluated in this order; the first matching row is the decision.
 | Transfer rho >= 0.4 | PARTIAL: composite plus per-domain columns; Stage 0 proceeds |
 | Otherwise | DOMAIN_SPECIFIC: per-domain product; #28 and Stage 0 re-planned per domain before further GPU spend |
 
-The transfer rho is always reported beside the test-retest rho, never bare.
+The transfer rho is always reported beside the test-retest rho, never bare. No
+rho is computed on a subset of models without its N printed beside it.
+
+A no-breadth exclusion: a model whose pre-probe pass@32 equals its pass@1 on a
+suite has no conversion ratio (`extract_features` raises). It is excluded from
+that suite's arm by name, and N for every rho involving that arm drops accordingly.
 
 ## The one permitted protocol change
 

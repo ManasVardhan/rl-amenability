@@ -1924,14 +1924,17 @@ git commit -m "docs: pre-register the probe transfer decision rule; rulings log 
   def transfer_stats(work_dir: Path, model_keys: list[str], n_boot: int = 10000) -> dict
       # everything render_report needs; JSON-serialisable
   def calibration_table(work_dir: Path, model_keys: list[str]) -> list[dict]
-      # one row per (model, suite) from preeval files: {"model", "suite", "pass@1", "pass@32", "by_bucket": {...}, "saturated": bool, "floored": bool}
-      # floored: pass@32 < 0.02 in every bucket; saturated: pass@1 > 0.95 in every bucket
+      # one row per (model, suite) from preeval files: {"model", "suite", "pass@1", "pass@32", "by_bucket": {...}, "saturated": bool, "floored": bool, "breadth_saturated": bool}
+      # floored: pass@32 < 0.02 in every bucket; saturated: pass@1 > 0.95 in every bucket;
+      # breadth_saturated: pass@32 > 0.95 in every bucket (transfer-rulings T4)
   def render_report(stats: dict, calibration: list[dict]) -> str
   def render_leaderboard(stats: dict) -> str
   def main(argv=None) -> None   # --work-dir, --n-boot; writes report.md, report.json, leaderboard_preview.md under work_dir
   ```
 
 **`decide` in order:** `n_complete < MIN_COMPLETE` -> `INCONCLUSIVE_INCOMPLETE`; `retest is None or retest.rho < RETEST_MIN` -> `INCONCLUSIVE_RELIABILITY`; `transfer.rho >= INVARIANT_RHO and transfer.p_value < P_THRESHOLD` -> `INVARIANT`; `transfer.rho >= PARTIAL_RHO` -> `PARTIAL`; else `DOMAIN_SPECIFIC`. `n_complete` is the number of models with a score in BOTH seed-0 arms after failures and breadth exclusions.
+
+**`breadth_saturated` (transfer-rulings T4):** pre-probe pass@32 > 0.95 in every bucket. It is a field of every `calibration_table` row and a column in the report's calibration table, after `saturated`. The code blocks below do not show it yet; the Task 9 implementer adds it beside `floored` and `saturated`, with a test.
 
 **`transfer_stats` returns** `{"n_models": 10, "arms": {arm: {"loaded": [...], "failures": {...}, "excluded": {...}, "scores": {...}, "features": {model: asdict(fv)}}}, "n_complete": int, "transfer": asdict(CorrelationResult) | None, "retest": ..., "per_feature": {feature: asdict | None}, "static_pass32": asdict | None, "loo_transfer": [floats] | None, "decision": str}`.
 
@@ -2388,11 +2391,12 @@ Follow README step 2. When all 20 `preeval/*.json` exist, run:
 uv run python -m scripts.analyze_transfer --work-dir results/transfer
 ```
 
-Read the calibration table. Acceptance, per (model, suite): `floored` is False and `saturated` is False.
+Read the calibration table. Acceptance, per (model, suite): `floored` is False and `saturated` is False, and Graph is not `breadth_saturated` for 3 or more models.
 
 - If Countdown is floored for any model: #21's concern is real. STOP and report; the fix is a bucket change in `countdown.py` and a ruling, and both suites' pilot must be rerun for that suite.
-- If Graph is floored for 3 or more models: apply the bound contingency from spec section 4, buckets `(7, 9, 11)`, as ruling T2, rerun `test_graphpath.py` (the guessability test must still pass), and rerun the Graph pilot with `--force`.
+- If Graph is floored for 3 or more models: apply the bound contingency from spec section 4, buckets `(7, 9, 11)`, as the next free T number in `docs/decisions/transfer-rulings.md`, rerun `test_graphpath.py` (the guessability test must still pass), and rerun the Graph pilot with `--force`.
 - If Graph is floored for 1 or 2 models: proceed; those models will be excluded by name if they have no breadth, and the decision rule already accounts for that.
+- If Graph is breadth-saturated (pre-probe pass@32 > 0.95 in every bucket) for 3 or more models: STOP and rule (transfer-rulings T4); candidate remedy is larger buckets, rerun the Graph pilot with `--force` after the change.
 
 Commit `results/transfer/preeval/` and the report. Comment on #21 with the calibration table and close it if nothing was floored.
 
@@ -2409,7 +2413,7 @@ Checks:
    uv run python -m scripts.run_probe --model qwen2.5-0.5b --suite countdown --work-dir results/transfer/lr_pilot --lr 3e-6
    uv run python -m scripts.run_probe --model qwen2.5-0.5b --suite countdown --work-dir results/transfer/lr_pilot --lr 5e-6
    ```
-   (as two array tasks or two `srun`s), pin the smallest lr showing gain by changing `ProbeConfig.learning_rate`'s default AND `RealRunner`'s expectations AND `prereg/stage0.md`'s "Fixed quantities" line, record ruling T-next with the three measured gains, rerun the seed-0 Countdown smoke for both models with `--force`, and only then continue.
+   (as two array tasks or two `srun`s), pin the smallest lr showing gain by changing `ProbeConfig.learning_rate`'s default AND `RealRunner`'s expectations AND `prereg/stage0.md`'s "Fixed quantities" line, record a ruling as the next free T number in `docs/decisions/transfer-rulings.md` with the three measured gains, rerun the seed-0 Countdown smoke for both models with `--force`, and only then continue.
 
 Close #33 with the SmolLM2 meta file's numbers as evidence.
 
