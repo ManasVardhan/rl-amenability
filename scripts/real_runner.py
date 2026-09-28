@@ -5,10 +5,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from amenability.eval.passk import evaluate_passk
+from amenability.probe.run import ProbeConfig, run_probe
 from amenability.probe.telemetry import ProbeTelemetry
 from amenability.registry.loader import load_registry
 from amenability.suites.base import SuiteRegistry
-from amenability.suites.countdown import generate_countdown, verify_countdown
+from amenability.suites.countdown import generate_countdown
 from amenability.suites.gsm8k import load_gsm8k, verify_gsm8k
 from amenability.training.grpo import GRPOSpec, run_grpo
 
@@ -46,43 +47,19 @@ class RealRunner:
 
     def probe(self, variant_key: str, force: bool = False) -> ProbeTelemetry:
         # Stage 0 is roughly 130 GPU-hours of sequential work in one process under
-        # a 24-hour SLURM wall clock. Persisting each probe's telemetry, and
-        # reusing it on a later invocation, is what stops a timeout destroying
-        # every number measured before it.
-        telemetry_path = self.work_dir / "telemetry" / f"{variant_key}-grpo.json"
-        if not force and telemetry_path.exists():
-            print(f"reusing cached probe telemetry for {variant_key} from {telemetry_path}")
-            return ProbeTelemetry.from_json(json.loads(telemetry_path.read_text()))
-
-        model_path = self._resolve(variant_key)
-        pre = evaluate_passk(
-            model_path, self.probe_items, verify_countdown, BREADTH_KS,
-            n_samples=64, temperature=1.0, seed=self.config.seed,
+        # a 24-hour SLURM wall clock. run_probe persists each probe's telemetry and
+        # reuses it on a later invocation, which is what stops a timeout destroying
+        # every number measured before it. Stage 0 uses one seed for items and runs.
+        return run_probe(
+            model_path=self._resolve(variant_key), model_key=variant_key,
+            suite_key="countdown", work_dir=self.work_dir,
+            config=ProbeConfig(
+                probe_steps=self.config.probe_steps,
+                num_generations=self.config.num_generations,
+                n_probe_items=self.config.n_probe_items,
+            ),
+            item_seed=self.config.seed, run_seed=self.config.seed, force=force,
         )
-        out_dir = self.work_dir / "probes" / variant_key
-        records = run_grpo(
-            GRPOSpec(
-                model_path=model_path, model_key=variant_key, items=self.probe_items,
-                verify_fn=verify_countdown, max_steps=self.config.probe_steps,
-                num_generations=self.config.num_generations, learning_rate=1e-6,
-                beta=0.04, temperature=1.0, seed=self.config.seed,
-                output_dir=str(out_dir), save_steps=None,
-            )
-        )
-        post = evaluate_passk(
-            str(out_dir), self.probe_items, verify_countdown, BREADTH_KS,
-            n_samples=64, temperature=1.0, seed=self.config.seed,
-        )
-        telemetry = ProbeTelemetry(
-            model_key=variant_key, algorithm="grpo", steps=records, pre=pre, post=post
-        )
-        telemetry_path.parent.mkdir(parents=True, exist_ok=True)
-        # Round-trip through to_json so ProbeTelemetry stays the single definition
-        # of the on-disk shape that from_json reads back.
-        telemetry_path.write_text(
-            json.dumps(json.loads(telemetry.to_json()), indent=2, sort_keys=True)
-        )
-        return telemetry
 
     def full_run(self, variant_key: str, force: bool = False) -> float:
         outcome_path = self.work_dir / "outcomes" / f"{variant_key}.json"

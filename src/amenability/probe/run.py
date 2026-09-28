@@ -1,0 +1,177 @@
+"""The probe: pre-eval, a short fixed-budget GRPO run, post-eval, telemetry to disk.
+
+This is the ONE implementation of the probe. RealRunner (Stage 0) and the per-job
+CLI (the transfer batch) both call it, so the protocol cannot drift between the
+two. Everything that varies between jobs is an argument; everything that must not
+vary lives in ProbeConfig's defaults.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+from amenability.eval.passk import PassKResult, evaluate_passk, pass_at_k
+from amenability.probe.telemetry import ProbeTelemetry
+from amenability.suites.base import TaskItem
+from amenability.suites.catalog import get_probe_suite
+from amenability.training.grpo import GRPOSpec, run_grpo
+
+
+@dataclass(frozen=True)
+class ProbeConfig:
+    probe_steps: int = 60
+    num_generations: int = 8
+    n_probe_items: int = 300
+    learning_rate: float = 1e-6
+    beta: float = 0.04
+    temperature: float = 1.0
+    n_samples: int = 64
+    ks: tuple[int, ...] = (1, 8, 32, 64)
+
+
+def probe_key(model_key: str, suite_key: str, run_seed: int) -> str:
+    return f"{model_key}-{suite_key}-grpo-s{run_seed}"
+
+
+def telemetry_path(work_dir: Path, model_key: str, suite_key: str, run_seed: int) -> Path:
+    return work_dir / "telemetry" / f"{probe_key(model_key, suite_key, run_seed)}.json"
+
+
+def meta_path(work_dir: Path, model_key: str, suite_key: str, run_seed: int) -> Path:
+    return work_dir / "meta" / f"{probe_key(model_key, suite_key, run_seed)}.json"
+
+
+def preeval_path(work_dir: Path, model_key: str, suite_key: str) -> Path:
+    return work_dir / "preeval" / f"{model_key}-{suite_key}.json"
+
+
+def passk_by_bucket(
+    result: PassKResult, items: list[TaskItem], ks: tuple[int, ...]
+) -> dict[int, dict[int, float]]:
+    by_bucket: dict[int, list[int]] = {}
+    for it in items:
+        by_bucket.setdefault(it.difficulty, []).append(result.per_item_correct[it.task_id])
+    return {
+        bucket: {
+            k: float(sum(pass_at_k(result.n_samples, c, k) for c in correct) / len(correct))
+            for k in ks
+        }
+        for bucket, correct in sorted(by_bucket.items())
+    }
+
+
+def _passk_from_dict(d: dict) -> PassKResult:
+    return PassKResult(
+        ks={int(k): v for k, v in d["ks"].items()}, n_samples=d["n_samples"],
+        n_items=d["n_items"], per_item_correct=d["per_item_correct"],
+    )
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _peak_memory_bytes() -> int | None:
+    import torch
+
+    if not torch.cuda.is_available():
+        return None
+    return int(torch.cuda.max_memory_allocated())
+
+
+def run_probe(
+    *,
+    model_path: str,
+    model_key: str,
+    suite_key: str,
+    work_dir: Path,
+    config: ProbeConfig = ProbeConfig(),
+    item_seed: int = 0,
+    run_seed: int = 0,
+    force: bool = False,
+    keep_checkpoint: bool = False,
+    pre_only: bool = False,
+    evaluate_fn=None,
+    train_fn=None,
+) -> ProbeTelemetry | PassKResult:
+    evaluate = evaluate_fn or evaluate_passk
+    train = train_fn or run_grpo
+    suite = get_probe_suite(suite_key)
+    # Items come from item_seed, NEVER from run_seed: a seed replicate must see
+    # byte-identical prompts or it measures item variance, not run variance.
+    items = suite.generate(config.n_probe_items, item_seed)
+
+    def evaluate_at(path: str) -> PassKResult:
+        return evaluate(
+            path, items, suite.verify, config.ks,
+            n_samples=config.n_samples, temperature=config.temperature, seed=run_seed,
+        )
+
+    if pre_only:
+        out = preeval_path(work_dir, model_key, suite_key)
+        if out.exists() and not force:
+            print(f"reusing cached pre-eval for {model_key}/{suite_key} from {out}")
+            return _passk_from_dict(json.loads(out.read_text())["pre"])
+        pre = evaluate_at(model_path)
+        _write_json(out, {
+            "model_key": model_key, "suite_key": suite_key, "item_seed": item_seed,
+            "n_items": len(items), "pre": asdict(pre),
+            "by_bucket": passk_by_bucket(pre, items, config.ks),
+        })
+        return pre
+
+    key = probe_key(model_key, suite_key, run_seed)
+    t_path = telemetry_path(work_dir, model_key, suite_key, run_seed)
+    if t_path.exists() and not force:
+        print(f"reusing cached probe telemetry for {key} from {t_path}")
+        return ProbeTelemetry.from_json(json.loads(t_path.read_text()))
+
+    wall: dict[str, float] = {}
+    t0 = time.monotonic()
+    pre = evaluate_at(model_path)
+    wall["pre"] = time.monotonic() - t0
+
+    out_dir = work_dir / "probes" / key
+    t0 = time.monotonic()
+    records = train(
+        GRPOSpec(
+            model_path=model_path, model_key=model_key, items=items,
+            verify_fn=suite.verify, max_steps=config.probe_steps,
+            num_generations=config.num_generations, learning_rate=config.learning_rate,
+            beta=config.beta, temperature=config.temperature, seed=run_seed,
+            output_dir=str(out_dir), save_steps=None,
+        )
+    )
+    wall["train"] = time.monotonic() - t0
+
+    t0 = time.monotonic()
+    post = evaluate_at(str(out_dir))
+    wall["post"] = time.monotonic() - t0
+
+    telemetry = ProbeTelemetry(
+        model_key=model_key, algorithm="grpo", steps=records, pre=pre, post=post
+    )
+    # Round-trip through to_json so ProbeTelemetry stays the single definition of
+    # the on-disk shape that from_json reads back.
+    _write_json(t_path, json.loads(telemetry.to_json()))
+    _write_json(meta_path(work_dir, model_key, suite_key, run_seed), {
+        "probe_key": key, "model_key": model_key, "suite_key": suite_key,
+        "item_seed": item_seed, "run_seed": run_seed,
+        "learning_rate": config.learning_rate, "probe_steps": config.probe_steps,
+        "n_step_records": len(records), "wall_seconds": wall,
+        "peak_memory_bytes": _peak_memory_bytes(),
+    })
+    manifest = out_dir / "run_manifest.json"
+    if manifest.exists():
+        dest = work_dir / "manifests" / f"{key}.json"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(manifest, dest)
+    if not keep_checkpoint:
+        # A probe checkpoint is ~3.5 GB and nothing downstream reads it; thirty of
+        # them would exhaust a home quota. The manifest and telemetry survive.
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return telemetry

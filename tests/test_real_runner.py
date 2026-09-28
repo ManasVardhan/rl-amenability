@@ -48,8 +48,11 @@ def runner(tmp_path, monkeypatch):
             for i in range(1, 4)
         ]
 
+    import amenability.probe.run as probe_run
     monkeypatch.setattr(real_runner, "evaluate_passk", fake_passk)
     monkeypatch.setattr(real_runner, "run_grpo", fake_grpo)
+    monkeypatch.setattr(probe_run, "evaluate_passk", fake_passk)
+    monkeypatch.setattr(probe_run, "run_grpo", fake_grpo)
 
     r = RealRunner.__new__(RealRunner)
     r.config = Stage0Config()
@@ -64,7 +67,7 @@ def runner(tmp_path, monkeypatch):
 
 def test_probe_writes_its_telemetry_to_disk(runner, tmp_path):
     t = runner.probe("qwen2.5-0.5b-oversft1x")
-    path = tmp_path / "telemetry" / "qwen2.5-0.5b-oversft1x-grpo.json"
+    path = tmp_path / "telemetry" / "qwen2.5-0.5b-oversft1x-countdown-grpo-s0.json"
     assert path.exists()
     written = json.loads(path.read_text())
     assert written["model_key"] == "qwen2.5-0.5b-oversft1x"
