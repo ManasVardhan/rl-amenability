@@ -1,4 +1,6 @@
+import gc
 import json
+import weakref
 
 import pytest
 from amenability.suites.base import TaskItem
@@ -185,3 +187,62 @@ def test_run_manifest_records_the_pinned_batch_shape(tmp_path):
     assert manifest["prompts_per_step"] == PROMPTS_PER_STEP
     assert manifest["per_device_train_batch_size"] == spec.num_generations
     assert manifest["gradient_accumulation_steps"] == PROMPTS_PER_STEP
+
+
+def test_run_grpo_leaves_no_reference_to_the_trainer(tmp_path):
+    """After run_grpo returns, the trainer must be freed: its model, reference
+    model and optimiser state are what hold the GPU, and vLLM initialises in the
+    same process right after (#33). The cyclic collector is disabled so that a
+    reference cycle keeping the trainer alive cannot be cleaned up by a lucky GC
+    pass; run_grpo has to free it deterministically."""
+    refs = {}
+
+    class Trainer:
+        def __init__(self, **kwargs):
+            self.callbacks = kwargs["callbacks"]
+            self.reward_funcs = kwargs["reward_funcs"]
+            self.model = object()
+            refs["trainer"] = weakref.ref(self)
+
+        def train(self):
+            # Same shape as _FakeTrainer.train: a real step scores a group of
+            # completions (prompt "p0" comes from items()) before logging.
+            for cb in self.callbacks:
+                self.reward_funcs[0](completions=["7", "8"], prompts=["p0", "p0"])
+                cb.on_log(
+                    args=None,
+                    state=type("S", (), {"global_step": 1, "log_history": []})(),
+                    control=None,
+                    logs={"kl": 0.0, "grad_norm": 1.0},
+                )
+
+        def save_model(self, path):
+            pass
+
+    spec = GRPOSpec(
+        model_path="x", model_key="k", items=items(2), verify_fn=verify, max_steps=1,
+        num_generations=2, learning_rate=1e-6, beta=0.04, temperature=1.0, seed=0,
+        output_dir=str(tmp_path / "out"), save_steps=None,
+    )
+    gc.disable()
+    try:
+        records = run_grpo(spec, trainer_factory=lambda **kw: Trainer(**kw))
+        assert len(records) == 1
+        assert refs["trainer"]() is None, "run_grpo still holds the trainer after returning"
+    finally:
+        gc.enable()
+
+
+def test_run_grpo_empties_the_cuda_cache_when_cuda_is_available(tmp_path, monkeypatch):
+    import torch
+
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: calls.append("empty"))
+    spec = GRPOSpec(
+        model_path="x", model_key="k", items=items(2), verify_fn=verify, max_steps=1,
+        num_generations=2, learning_rate=1e-6, beta=0.04, temperature=1.0, seed=0,
+        output_dir=str(tmp_path / "out"), save_steps=None,
+    )
+    run_grpo(spec, trainer_factory=lambda **kw: _FakeTrainer(**kw))
+    assert calls == ["empty"]

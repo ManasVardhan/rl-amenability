@@ -157,9 +157,31 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         json.dumps(manifest, indent=2, sort_keys=True)
     )
 
-    return callback.records
+    records = list(callback.records)
+    # Break the closure before dropping the trainer. model_getter closes over the
+    # `trainer` variable and the trainer holds the callback, so after return the
+    # trainer (model, reference model, optimiser state) would survive in a
+    # reference cycle, which reference counting cannot free. It would stay on the
+    # GPU until the cyclic GC happened to run, i.e. not reliably before the probe
+    # initialises a vLLM engine at 0.85 memory utilisation in the same process,
+    # which is the OOM issue #33 describes. Breaking the closure and collecting
+    # explicitly frees it deterministically.
+    callback.model_getter = lambda: None
+    del callback, model_obj, trainer
+    _release_gpu()
+    return records
 
 
 class _NullEntropyProbe:
     def measure(self, model) -> float:
         return 0.0
+
+
+def _release_gpu() -> None:
+    import gc
+
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
