@@ -244,16 +244,20 @@ def test_meta_is_written_before_telemetry_so_a_failed_commit_is_not_cached(tmp_p
     assert t_path.exists() and meta_path(tmp_path, "m", "countdown", 0).exists()
 
 
-def test_write_json_respects_the_umask_not_mkstemp_0600(tmp_path):
+def test_write_json_respects_the_umask_not_mkstemp_0600(tmp_path, monkeypatch):
+    from amenability.probe import run as run_mod
+    target = tmp_path / "telemetry" / "x.json"
+    monkeypatch.setattr(run_mod, "_UMASK", 0o022)
+    run_mod._write_json(target, {"a": 1})
+    assert target.stat().st_mode & 0o777 == 0o644
+    monkeypatch.setattr(run_mod, "_UMASK", 0o027)
+    run_mod._write_json(target, {"a": 2})
+    assert target.stat().st_mode & 0o777 == 0o640
+
+
+def test_umask_is_read_once_at_import_and_matches_the_process_umask():
     import os
     from amenability.probe import run as run_mod
-    old = os.umask(0o022)
-    try:
-        target = tmp_path / "telemetry" / "x.json"
-        run_mod._write_json(target, {"a": 1})
-        assert target.stat().st_mode & 0o777 == 0o644
-        os.umask(0o027)
-        run_mod._write_json(target, {"a": 2})
-        assert target.stat().st_mode & 0o777 == 0o640
-    finally:
-        os.umask(old)
+    current = os.umask(0)
+    os.umask(current)
+    assert run_mod._UMASK == current

@@ -9,7 +9,8 @@
 
 set -euo pipefail
 module purge
-module load cuda/12.4
+# No `module load cuda` (transfer-rulings T14): the pip torch and vllm wheels
+# bundle the CUDA runtime and only need the driver.
 cd "$SLURM_SUBMIT_DIR"
 
 # vllm lives in the "gpu" extra, not the base dependencies (it broke `uv sync` on

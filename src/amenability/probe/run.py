@@ -21,6 +21,11 @@ from amenability.suites.base import TaskItem
 from amenability.suites.catalog import get_probe_suite
 from amenability.training.grpo import GRPOSpec, run_grpo
 
+# os.umask can only be read by setting it. Read it once at import, not per write,
+# so no write opens a process-wide umask-0 window for other threads.
+_UMASK = os.umask(0)
+os.umask(_UMASK)
+
 
 @dataclass(frozen=True)
 class ProbeConfig:
@@ -87,10 +92,8 @@ def _write_json(path: Path, payload: dict) -> None:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
         # mkstemp creates the file 0600 and os.replace keeps that mode, which
         # would make every result owner-only. Give it the mode a plain open()
-        # would have had. os.umask can only be read by setting it, so set it back.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp, 0o666 & ~umask)
+        # would have had.
+        os.chmod(tmp, 0o666 & ~_UMASK)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)

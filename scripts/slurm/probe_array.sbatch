@@ -16,6 +16,8 @@
 #SBATCH --output=logs/probe_%A_%a.out
 
 set -euo pipefail
+# Resolve JOBS_FILE, WORK_DIR and the log directory against the submit dir.
+cd "${SLURM_SUBMIT_DIR:-.}"
 
 JOBS_FILE="${JOBS_FILE:-results/transfer/jobs.txt}"
 WORK_DIR="${WORK_DIR:-results/transfer}"
@@ -63,7 +65,6 @@ fi
 # and only need the driver, and a mismatched toolkit module can shadow the
 # bundled libraries. module purge keeps the login node's modules out.
 module purge
-cd "${SLURM_SUBMIT_DIR:-.}"
 mkdir -p logs
 echo "task $TASK_ID on $(hostname): ${cmd[*]}"
 "${cmd[@]}"

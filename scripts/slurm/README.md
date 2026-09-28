@@ -10,17 +10,28 @@ directory to `${SCRATCH:-/scratch1/$USER}` and put the Hugging Face cache at
 ## Before the first run
 
 1. Confirm the scratch path exists: `ls -d /scratch1/$USER`.
-2. Confirm `uv` is on the PATH of a compute node, not only the login node:
+2. Confirm `uv` survives `module purge` on a compute node, exactly as
+   `probe_array.sbatch` runs it (it purges modules before `uv run`):
 
-       srun --partition=main --time=00:05:00 --pty bash
-       which uv
-       exit
+       srun --partition=main --time=00:05:00 --pty bash -lc 'module purge; which uv && uv --version'
 
-3. Only if the smoke probe (step 3) fails with a CUDA library error: run
-   `module avail cuda` and add the matching `module load` line after
-   `module purge` in `probe_array.sbatch`. The scripts load no CUDA module on
-   purpose: the pip torch and vllm wheels bundle the CUDA runtime and only need
-   the driver.
+   If `which uv` prints nothing after the purge, `uv` came from a module and
+   every array task would fail with exit 127. Either install uv to
+   `~/.local/bin` with the installer (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+   or remove `module purge` from `probe_array.sbatch`, and record which one in
+   `docs/decisions/transfer-rulings.md`.
+
+3. After step 1 (the prefetch syncs the `gpu` extra), confirm the synced
+   environment imports torch and vllm after the purge. Run this from the
+   repository root; `$PWD` expands on the login node to the repo path:
+
+       srun --partition=main --time=00:10:00 --pty bash -lc "cd $PWD && module purge && uv run python -c 'import torch, vllm; print(torch.__version__)'"
+
+4. Only if the pilot (step 2) or the smoke probes (step 3) fail with a CUDA
+   library error: run `module avail cuda` and add the matching `module load`
+   line after `module purge` in `probe_array.sbatch`. The scripts load no CUDA
+   module on purpose: the pip torch and vllm wheels bundle the CUDA runtime and
+   only need the driver.
 
 ## Once
 
@@ -65,8 +76,15 @@ Jobs whose telemetry already exists (the smoke probes) exit in seconds.
 
     squeue -u $USER
     grep -l Traceback logs/probe_*.out
-    # rerun failed tasks by id (keep --constraint if step 4 used it):
+    # rerun failed batch tasks by id (keep --constraint if step 4 used it):
     sbatch --array=4,17 scripts/slurm/probe_array.sbatch
+
+Task ids index the manifest the job was submitted with. To rerun a pilot or
+smoke task, repeat the original submission's `JOBS_FILE=` and `EXTRA_ARGS=`
+prefix, otherwise the ids index the batch manifest and run a different job:
+
+    JOBS_FILE=results/transfer/jobs_pilot.txt EXTRA_ARGS=--pre-only \
+      sbatch --array=4,17 scripts/slurm/probe_array.sbatch
 
 ## 5. Analysis (CPU, seconds)
 
@@ -75,4 +93,5 @@ Jobs whose telemetry already exists (the smoke probes) exit in seconds.
 
 ## Dry run (any machine, no GPU, SCRATCH need not be set)
 
-    SLURM_ARRAY_TASK_ID=3 DRY_RUN=1 bash scripts/slurm/probe_array.sbatch
+    uv run python -m scripts.make_transfer_jobs --out /tmp/jobs.txt
+    SLURM_ARRAY_TASK_ID=3 DRY_RUN=1 JOBS_FILE=/tmp/jobs.txt bash scripts/slurm/probe_array.sbatch

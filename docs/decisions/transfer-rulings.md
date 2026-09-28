@@ -188,8 +188,12 @@ line is needed: anakano_429 is the default account.
 with the constraint.
 
 **T14. The launchers load no CUDA module.**
-The plan's `module load cuda/12.4` is dropped from the new launchers; `module
-purge` stays in the array script. The pip torch and vllm wheels bundle the CUDA
+The plan's `module load cuda/12.4` is dropped from the new launchers and from
+`stage0.sbatch`; `module purge` stays in the array script. The launch README's
+first-run checklist confirms that `uv` and the synced environment still work
+after `module purge` on a compute node; if `uv` turns out to come from a module,
+the owner either installs it to `~/.local/bin` or removes the purge, and records
+which here. The pip torch and vllm wheels bundle the CUDA
 runtime and need only the driver (H1 found driver 580, which supports CUDA 12 and
 13 runtimes). The module name was never verified on Discovery, and a mismatched
 toolkit can shadow the bundled libraries. The launch README tells the owner to run
@@ -204,5 +208,6 @@ manual `--force`. Meta is now written first and telemetry last, so telemetry is
 the commit and an interrupted job retrains. Separately, `_write_json`'s temp file
 came from `mkstemp` with mode 0600, which `os.replace` kept, making every result
 owner-only; it is now chmodded to `0o666 & ~umask` before the rename, the mode a
-plain open would give.
+plain open would give. The umask is read once at import, because reading it
+means setting it, and a per-write read would open a process-wide umask-0 window.
 *Cost if wrong:* none to the protocol; both are write-path changes with tests.

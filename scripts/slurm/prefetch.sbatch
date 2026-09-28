@@ -9,6 +9,7 @@
 #SBATCH --output=logs/prefetch_%j.out
 
 set -euo pipefail
+cd "${SLURM_SUBMIT_DIR:-.}"
 # $SCRATCH is unset on CARC login nodes, so default to the personal scratch
 # directory rather than requiring it.
 SCRATCH_DIR="${SCRATCH:-/scratch1/${USER:-$(id -un)}}"
@@ -17,7 +18,6 @@ if [ -z "${HF_HOME:-}" ] && [ ! -d "$SCRATCH_DIR" ]; then
   exit 1
 fi
 export HF_HOME="${HF_HOME:-$SCRATCH_DIR/hf}"
-cd "${SLURM_SUBMIT_DIR:-.}"
 mkdir -p logs "$HF_HOME"
 
 # No `module load cuda`: this node never touches a GPU, and on the GPU nodes the
