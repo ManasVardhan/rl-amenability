@@ -24,6 +24,10 @@ WORK_DIR="${WORK_DIR:-results/transfer}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 TASK_ID="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is unset: launch with --array}"
 
+if [ ! -f "$JOBS_FILE" ]; then
+  echo "job list not found: $JOBS_FILE (generate it with python -m scripts.make_transfer_jobs, from a shell where uv works)" >&2
+  exit 1
+fi
 line=$(sed -n "$((TASK_ID + 1))p" "$JOBS_FILE")
 if [ -z "$line" ]; then
   echo "no job on line $((TASK_ID + 1)) of $JOBS_FILE" >&2
@@ -52,6 +56,16 @@ if [ -n "${DRY_RUN:-}" ]; then
   exit 0
 fi
 
+# SLURM jobs inherit the submitting shell's PATH, and a shell without
+# ~/.local/bin on it (where the uv installer puts uv) kills every task with
+# "uv: command not found". Do not depend on it. Checked after the dry-run exit
+# so a laptop dry run without uv still works.
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv: command not found (searched PATH and \$HOME/.local/bin): install it with curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  exit 1
+fi
+
 if [ -z "$HF_HOME_SET_BY_USER" ] && [ ! -d "$SCRATCH_DIR" ]; then
   echo "scratch directory $SCRATCH_DIR does not exist: set SCRATCH or HF_HOME" >&2
   exit 1
@@ -65,6 +79,8 @@ fi
 # and only need the driver, and a mismatched toolkit module can shadow the
 # bundled libraries. module purge keeps the login node's modules out.
 module purge
+# module purge leaves ~/.local/bin alone; re-prepending is harmless insurance.
+export PATH="$HOME/.local/bin:$PATH"
 mkdir -p logs
 echo "task $TASK_ID on $(hostname): ${cmd[*]}"
 "${cmd[@]}"

@@ -10,6 +10,14 @@
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"
+# SLURM jobs inherit the submitting shell's PATH, and a shell without
+# ~/.local/bin on it (where the uv installer puts uv) fails with
+# "uv: command not found". Do not depend on it.
+export PATH="$HOME/.local/bin:$PATH"
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv: command not found (searched PATH and \$HOME/.local/bin): install it with curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  exit 1
+fi
 # $SCRATCH is unset on CARC login nodes, so default to the personal scratch
 # directory rather than requiring it.
 SCRATCH_DIR="${SCRATCH:-/scratch1/${USER:-$(id -un)}}"

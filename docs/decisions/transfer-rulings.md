@@ -211,3 +211,22 @@ owner-only; it is now chmodded to `0o666 & ~umask` before the rename, the mode a
 plain open would give. The umask is read once at import, because reading it
 means setting it, and a per-write read would open a process-wide umask-0 window.
 *Cost if wrong:* none to the protocol; both are write-path changes with tests.
+
+**T16. The launchers no longer depend on the submitting shell's PATH, and a missing manifest fails loudly.**
+Written from real CARC failures. uv lives at `$HOME/.local/bin/uv`, but some of
+the owner's shells lacked `~/.local/bin` on PATH, and SLURM jobs inherit the
+submitting shell's PATH, so a prefetch job died with `uv: command not found`.
+Both `probe_array.sbatch` and `prefetch.sbatch` now prepend `$HOME/.local/bin`
+to PATH and exit 1 with a clear message if `command -v uv` still finds nothing
+(in the array script after the dry-run exit, so laptop dry runs need no uv, and
+before `module purge`, with the export repeated after the purge). Separately, a
+job manifest whose generating command had failed on the same missing uv was
+never written, and every array task exited on a bare `sed: can't read` error;
+the array script now checks `$JOBS_FILE` exists first, dry run included, and
+names the command that generates it. The launch README's first-run checklist
+now records the setup that worked: uv on PATH via `~/.bash_profile`, uv cache on
+scratch, a venv on uv-managed Python 3.11 (the default `python` is a spack
+module that `module purge` removes), `uv sync` on a compute node with capped
+concurrency (the login node's thread cap crashed it), and the gated-repo check.
+*Cost if wrong:* none to the protocol; if uv lives elsewhere the job fails in
+seconds with a message naming the fix.

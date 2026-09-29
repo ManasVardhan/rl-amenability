@@ -9,8 +9,42 @@ directory to `${SCRATCH:-/scratch1/$USER}` and put the Hugging Face cache at
 
 ## Before the first run
 
-1. Confirm the scratch path exists: `ls -d /scratch1/$USER`.
-2. Confirm `uv` survives `module purge` on a compute node, exactly as
+This is the setup that worked on CARC Discovery. Do not run `uv sync` on the
+login node: its per-user thread cap makes uv's thread pool crash with EAGAIN.
+
+1. Install uv and put it on PATH in `~/.bash_profile` (login shells read that
+   file; create it if you have no `~/.bashrc` either):
+
+       curl -LsSf https://astral.sh/uv/install.sh | sh
+       echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile
+       source ~/.bash_profile && which uv
+
+   The launchers prepend `$HOME/.local/bin` to PATH themselves, but
+   `make_transfer_jobs` and `hf` run from your shell.
+
+2. Confirm the scratch path exists and point uv's cache at it:
+
+       ls -d /scratch1/$USER
+       echo 'export UV_CACHE_DIR=/scratch1/$USER/uv-cache' >> ~/.bash_profile
+
+3. Create the venv on uv-managed Python. The default `python` is a spack
+   module, and the jobs run `module purge`, so a venv built on it breaks:
+
+       uv python install 3.11
+       uv venv --python 3.11 --python-preference only-managed
+
+4. Sync on a compute node with capped concurrency (run from the repo root;
+   `$PWD` expands on the login node):
+
+       srun --partition=main --cpus-per-task=4 --mem=16G --time=01:00:00 --pty bash -lc "cd $PWD && UV_CONCURRENT_DOWNLOADS=4 UV_CONCURRENT_INSTALLS=2 UV_CONCURRENT_BUILDS=1 RAYON_NUM_THREADS=4 uv sync --extra dev --extra gpu"
+
+5. Gated models: Llama-3.2-1B and gemma-3-1b-pt need access requested on their
+   Hugging Face model pages, with the account behind your token, or the
+   prefetch fails with 403 GatedRepoError. Check which account that is:
+
+       uv run --no-sync hf auth whoami
+
+6. Confirm `uv` survives `module purge` on a compute node, exactly as
    `probe_array.sbatch` runs it (it purges modules before `uv run`):
 
        srun --partition=main --time=00:05:00 --pty bash -lc 'module purge; which uv && uv --version'
@@ -21,13 +55,13 @@ directory to `${SCRATCH:-/scratch1/$USER}` and put the Hugging Face cache at
    or remove `module purge` from `probe_array.sbatch`, and record which one in
    `docs/decisions/transfer-rulings.md`.
 
-3. After step 1 (the prefetch syncs the `gpu` extra), confirm the synced
+7. After section 1 below (the prefetch syncs the `gpu` extra), confirm the synced
    environment imports torch and vllm after the purge. Run this from the
    repository root; `$PWD` expands on the login node to the repo path:
 
        srun --partition=main --time=00:10:00 --pty bash -lc "cd $PWD && module purge && uv run python -c 'import torch, vllm; print(torch.__version__)'"
 
-4. Only if the pilot (step 2) or the smoke probes (step 3) fail with a CUDA
+8. Only if the pilot (section 2) or the smoke probes (section 3) fail with a CUDA
    library error: run `module avail cuda` and add the matching `module load`
    line after `module purge` in `probe_array.sbatch`. The scripts load no CUDA
    module on purpose: the pip torch and vllm wheels bundle the CUDA runtime and
@@ -75,6 +109,9 @@ Jobs whose telemetry already exists (the smoke probes) exit in seconds.
 ## Monitoring and reruns
 
     squeue -u $USER
+    # tasks that exit within seconds: check this first (uv missing, or the
+    # manifest was never generated)
+    grep -l "command not found\|job list not found" logs/probe_*.out
     grep -l Traceback logs/probe_*.out
     # rerun failed batch tasks by id (keep --constraint if step 4 used it):
     sbatch --array=4,17 scripts/slurm/probe_array.sbatch
