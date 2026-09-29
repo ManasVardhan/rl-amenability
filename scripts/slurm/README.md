@@ -12,8 +12,10 @@ directory to `${SCRATCH:-/scratch1/$USER}` and put the Hugging Face cache at
 This is the setup that worked on CARC Discovery. Do not run `uv sync` on the
 login node: its per-user thread cap makes uv's thread pool crash with EAGAIN.
 
-1. Install uv and put it on PATH in `~/.bash_profile` (login shells read that
-   file; create it if you have no `~/.bashrc` either):
+1. Install uv and put it on PATH in `~/.bash_profile`. If `~/.bash_profile`
+   does not exist, create it. If you also have `~/.profile` or `~/.bashrc`, add
+   `[ -f ~/.bashrc ] && . ~/.bashrc` (or `. ~/.profile`) to it, since bash
+   reads only `~/.bash_profile` when it exists:
 
        curl -LsSf https://astral.sh/uv/install.sh | sh
        echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bash_profile
@@ -25,7 +27,7 @@ login node: its per-user thread cap makes uv's thread pool crash with EAGAIN.
 2. Confirm the scratch path exists and point uv's cache at it:
 
        ls -d /scratch1/$USER
-       echo 'export UV_CACHE_DIR=/scratch1/$USER/uv-cache' >> ~/.bash_profile
+       echo 'export UV_CACHE_DIR=/scratch1/$USER/uv-cache' >> ~/.bash_profile && source ~/.bash_profile
 
 3. Create the venv on uv-managed Python. The default `python` is a spack
    module, and the jobs run `module purge`, so a venv built on it breaks:
@@ -99,7 +101,7 @@ login node: its per-user thread cap makes uv's thread pool crash with EAGAIN.
     uv run python -m scripts.make_transfer_jobs
     sbatch --array=0-29%8 scripts/slurm/probe_array.sbatch
 
-If step 3 showed `peak_train_bytes` above 36e9 for either model, a 40 GB A100 is
+If section 3 showed `peak_train_bytes` above 36e9 for either model, a 40 GB A100 is
 too tight; request the 80 GB nodes instead:
 
     sbatch --constraint=a100-80gb --array=0-29%8 scripts/slurm/probe_array.sbatch
@@ -111,9 +113,9 @@ Jobs whose telemetry already exists (the smoke probes) exit in seconds.
     squeue -u $USER
     # tasks that exit within seconds: check this first (uv missing, or the
     # manifest was never generated)
-    grep -l "command not found\|job list not found" logs/probe_*.out
+    grep -l "command not found\|job list not found" logs/probe_*.out logs/prefetch_*.out
     grep -l Traceback logs/probe_*.out
-    # rerun failed batch tasks by id (keep --constraint if step 4 used it):
+    # rerun failed batch tasks by id (keep --constraint if section 4 used it):
     sbatch --array=4,17 scripts/slurm/probe_array.sbatch
 
 Task ids index the manifest the job was submitted with. To rerun a pilot or

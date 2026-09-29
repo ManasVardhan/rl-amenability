@@ -5,7 +5,7 @@
 #   sbatch --array=0-29%8 scripts/slurm/probe_array.sbatch
 # The gres below takes any A100 (40 or 80 GB). If the smoke probe's
 # peak_train_bytes exceeds 36e9, add --constraint=a100-80gb to the sbatch line
-# (see scripts/slurm/README.md, step 4). No --account line: anakano_429 is the
+# (see scripts/slurm/README.md, section 4). No --account line: anakano_429 is the
 # default account.
 #SBATCH --job-name=amen-probe
 #SBATCH --partition=gpu
@@ -25,7 +25,7 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 TASK_ID="${SLURM_ARRAY_TASK_ID:?SLURM_ARRAY_TASK_ID is unset: launch with --array}"
 
 if [ ! -f "$JOBS_FILE" ]; then
-  echo "job list not found: $JOBS_FILE (generate it with python -m scripts.make_transfer_jobs, from a shell where uv works)" >&2
+  echo "job list not found: $JOBS_FILE (generate it with uv run --no-sync python -m scripts.make_transfer_jobs, from a shell where uv works)" >&2
   exit 1
 fi
 line=$(sed -n "$((TASK_ID + 1))p" "$JOBS_FILE")
