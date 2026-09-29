@@ -89,6 +89,15 @@ login node: its per-user thread cap makes uv's thread pool crash with EAGAIN.
       sbatch --array=0-19%8 scripts/slurm/probe_array.sbatch
     # results land in results/transfer/preeval/
 
+The pilot alone may take any bf16-capable GPU to shorten the queue wait
+(transfer-rulings T18). Override the script's A100 request on the sbatch line:
+
+    JOBS_FILE=results/transfer/jobs_pilot.txt EXTRA_ARGS=--pre-only \
+      sbatch --gres=gpu:1 --constraint="a100|l40s|a40" --array=0-19%8 scripts/slurm/probe_array.sbatch
+
+Never v100 or p100 (no bf16). The smoke probes and the batch stay on A100, so
+every model's training protocol runs on the same hardware.
+
 ## 3. Smoke probes (2 GPU jobs)
 
     uv run python -m scripts.make_transfer_jobs --only-model smollm2-1.7b qwen2.5-0.5b --out results/transfer/jobs_smoke.txt
@@ -117,6 +126,16 @@ Jobs whose telemetry already exists (the smoke probes) exit in seconds.
     grep -l Traceback logs/probe_*.out
     # rerun failed batch tasks by id (keep --constraint if section 4 used it):
     sbatch --array=4,17 scripts/slurm/probe_array.sbatch
+
+If tasks fail at vLLM engine warmup with `Could not find nvcc` raised from
+flashinfer: the launchers export `VLLM_USE_FLASHINFER_SAMPLER=0`
+(transfer-rulings T17) so the sampler never JIT-compiles, which means some other
+FlashInfer kernel is JIT-compiling. The fallback is to point `CUDA_HOME` at a
+CUDA toolkit (a CARC cuda module from `module avail cuda`, or the venv's
+`nvidia-cuda-nvcc` package) and record a ruling in
+`docs/decisions/transfer-rulings.md`.
+
+    grep -l "Could not find nvcc" logs/probe_*.out
 
 Task ids index the manifest the job was submitted with. To rerun a pilot or
 smoke task, repeat the original submission's `JOBS_FILE=` and `EXTRA_ARGS=`

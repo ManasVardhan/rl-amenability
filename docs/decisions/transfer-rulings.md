@@ -230,3 +230,29 @@ module that `module purge` removes), `uv sync` on a compute node with capped
 concurrency (the login node's thread cap crashed it), and the gated-repo check.
 *Cost if wrong:* none to the protocol; if uv lives elsewhere the job fails in
 seconds with a message naming the fix.
+
+**T17. vLLM uses its built-in PyTorch sampler, not FlashInfer's.**
+Written from a real CARC failure: all 16 pilot tasks died at vLLM engine warmup
+with `RuntimeError: Could not find nvcc and default cuda_home='/usr/local/cuda'
+doesn't exist`, raised from FlashInfer's JIT path during
+`compile_or_warm_up_model`. Our `SamplingParams` use `top_p=0.95`, which routes
+through FlashInfer's top-p sampler, and FlashInfer JIT-compiles it with nvcc;
+CARC compute nodes have no CUDA toolkit on PATH (T14 loads no CUDA module). The
+launchers (`probe_array.sbatch`, `stage0.sbatch`) and the Modal image now set
+`VLLM_USE_FLASHINFER_SAMPLER=0`, so vLLM uses its precompiled PyTorch
+top-p/top-k sampler. It draws from the same distribution (temperature 1.0,
+top_p 0.95), applied uniformly to every model and suite, so the protocol is
+unchanged. Probe meta and pre-eval files record the variable's value as
+`vllm_use_flashinfer_sampler`; the analysis records it only and gates on nothing.
+*Cost if wrong:* if another FlashInfer JIT op (attention) also needs nvcc, the
+fallback is `CUDA_HOME` pointed at the venv's `nvidia-cuda-nvcc` package or a
+CARC cuda module, recorded in a further ruling.
+
+**T18. The calibration pilot may run on a100, l40s or a40; training stays on A100.**
+The pre-only calibration pilot may be submitted with
+`--gres=gpu:1 --constraint="a100|l40s|a40"` (bf16-capable GPUs, never v100 or
+p100) to shorten queue waits. The smoke probes and the transfer training batch
+stay on `--gres=gpu:a100:1`, so every model's protocol runs on the same
+hardware. Pilot numbers are calibration, not scored, and tiny cross-GPU numeric
+differences cannot meaningfully flip the floored or saturated flags.
+*Cost if wrong:* a borderline calibration flag differs on rerun.

@@ -145,6 +145,8 @@ def run_probe(
             "model_key": model_key, "suite_key": suite_key, "item_seed": item_seed,
             "n_items": len(items), "pre": asdict(pre),
             "by_bucket": passk_by_bucket(pre, items, config.ks),
+            # Which vLLM sampler produced the samples (transfer-rulings T17).
+            "vllm_use_flashinfer_sampler": os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"),
         })
         return pre
 
@@ -200,6 +202,9 @@ def run_probe(
         "peak_memory_bytes": None if cuda is None else max(pre_peak, int(cuda.max_memory_allocated())),
         "peak_train_bytes": peak_train,
         "allocated_after_train_bytes": allocated_after_train,
+        # Which vLLM sampler produced the samples (transfer-rulings T17). Recorded
+        # only; the analysis does not gate on it.
+        "vllm_use_flashinfer_sampler": os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"),
     })
     # Round-trip through to_json so ProbeTelemetry stays the single definition of
     # the on-disk shape that from_json reads back.

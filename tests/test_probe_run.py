@@ -143,6 +143,24 @@ def test_pre_only_writes_by_bucket_and_never_trains(tmp_path, fakes):
     assert state["passk_calls"] == 1
 
 
+def test_meta_and_preeval_record_the_vllm_sampler_setting(tmp_path, fakes, monkeypatch):
+    # Ruling T17: every result says which vLLM sampler produced it.
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    _run(tmp_path, fakes)
+    meta = json.loads(meta_path(tmp_path, "m", "countdown", 0).read_text())
+    assert meta["vllm_use_flashinfer_sampler"] == "0"
+    _run(tmp_path, fakes, pre_only=True)
+    pre = json.loads(preeval_path(tmp_path, "m", "countdown").read_text())
+    assert pre["vllm_use_flashinfer_sampler"] == "0"
+
+
+def test_sampler_key_is_present_and_none_when_the_env_var_is_unset(tmp_path, fakes, monkeypatch):
+    monkeypatch.delenv("VLLM_USE_FLASHINFER_SAMPLER", raising=False)
+    _run(tmp_path, fakes)
+    meta = json.loads(meta_path(tmp_path, "m", "countdown", 0).read_text())
+    assert "vllm_use_flashinfer_sampler" in meta and meta["vllm_use_flashinfer_sampler"] is None
+
+
 def test_passk_by_bucket_uses_the_unbiased_estimator():
     items = [TaskItem(task_id=f"t{i}", suite="s", prompt="p", answer="a", difficulty=1 + i // 2)
              for i in range(4)]

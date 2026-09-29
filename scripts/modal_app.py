@@ -13,6 +13,9 @@ image = (
     # must request BOTH extras on the editable install. Do not "simplify" this
     # back to a bare `-e /repo`.
     .run_commands("uv pip install --system -e '/repo[dev,gpu]'")
+    # Same sampler as the CARC launchers (transfer-rulings T17): vLLM's built-in
+    # PyTorch top-p sampler, not FlashInfer's JIT-compiled one.
+    .env({"VLLM_USE_FLASHINFER_SAMPLER": "0"})
 )
 app = modal.App("rl-amenability-stage0")
 

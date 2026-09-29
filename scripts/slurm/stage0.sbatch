@@ -12,6 +12,11 @@ module purge
 # No `module load cuda` (transfer-rulings T14): the pip torch and vllm wheels
 # bundle the CUDA runtime and only need the driver.
 cd "$SLURM_SUBMIT_DIR"
+# FlashInfer JIT-compiles its top-p sampler and needs nvcc, which CARC compute
+# nodes lack. vLLM's built-in PyTorch sampler draws from the same temperature /
+# top-p distribution, applied identically to every model, so the protocol is
+# unchanged (transfer-rulings T17).
+export VLLM_USE_FLASHINFER_SAMPLER=0
 
 # vllm lives in the "gpu" extra, not the base dependencies (it broke `uv sync` on
 # non-Linux dev machines when it was a base dependency), so a GPU run needs BOTH

@@ -44,6 +44,11 @@ HF_HOME_SET_BY_USER="${HF_HOME:+yes}"
 export HF_HOME="${HF_HOME:-$SCRATCH_DIR/hf}"
 export HF_HUB_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
+# FlashInfer JIT-compiles its top-p sampler and needs nvcc, which CARC compute
+# nodes lack. vLLM's built-in PyTorch sampler draws from the same temperature /
+# top-p distribution, applied identically to every model, so the protocol is
+# unchanged (transfer-rulings T17).
+export VLLM_USE_FLASHINFER_SAMPLER=0
 
 cmd=(uv run python -m scripts.run_probe --model "$MODEL" --suite "$SUITE" --run-seed "$SEED" --work-dir "$WORK_DIR")
 if [ -n "$EXTRA_ARGS" ]; then
