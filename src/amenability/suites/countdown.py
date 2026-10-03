@@ -9,10 +9,27 @@ from fractions import Fraction
 
 from amenability.suites.base import TaskItem
 
+# TinyZero base-model completion scaffold (transfer-rulings T19). The probe roster is
+# base models, which read a bare instruction as the start of a web document and do
+# not answer it. The prompt frames a User/Assistant exchange and ends inside an
+# opened <think> block, so the continuation is reasoning, then the answer tag.
+# Every consumer verifies the completion alone, so the in-prompt example (value 1,
+# below every target) is never scored as the model's answer.
+SCAFFOLD_HEAD = (
+    "A conversation between User and Assistant. The user asks a question, and the "
+    "Assistant solves it. The assistant first thinks about the reasoning process in "
+    "the mind and then provides the user with the answer.\n"
+    "User: "
+)
+SCAFFOLD_TAIL = "\nAssistant: Let me solve this step by step.\n<think>\n"
+
 PROMPT = (
-    "Using each of the numbers {numbers} exactly once, and the operators + - * /, "
-    "write an arithmetic expression equal to {target}.\n"
-    "Put only the expression inside <answer></answer> tags."
+    SCAFFOLD_HEAD
+    + "Using the numbers {numbers}, create an equation that equals {target}. "
+    "You can use basic arithmetic operations (+, -, *, /) and each number must be "
+    "used exactly once. Show your work in <think> </think> tags. And return the "
+    "final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>."
+    + SCAFFOLD_TAIL
 )
 
 _OPS = {
@@ -115,11 +132,28 @@ def _eval_node(node: ast.AST, used: list[int]) -> Fraction:
     raise ValueError(f"disallowed node: {type(node).__name__}")
 
 
+_TRAILING_EQUALS_RE = re.compile(r"^(?P<expr>[^=]*?)\s*=\s*(?P<rhs>-?\d+)\s*$")
+
+
+def _strip_trailing_target(expr: str, target: int) -> str | None:
+    """Drop one trailing "= <target>" (transfer-rulings T19). An expression with any
+    other "=" (a wrong right-hand side, a chain, the target on the left) is None."""
+    if "=" not in expr:
+        return expr
+    m = _TRAILING_EQUALS_RE.match(expr)
+    if m is None or int(m.group("rhs")) != target:
+        return None
+    return m.group("expr")
+
+
 def verify_countdown(item: TaskItem, completion: str) -> bool:
     expr = extract_expression(completion)
     if expr is None:
         return False
     numbers_s, target_s = item.answer.split("|")
+    expr = _strip_trailing_target(expr, int(target_s))
+    if expr is None:
+        return False
     available = sorted(int(x) for x in numbers_s.split(","))
     try:
         tree = ast.parse(expr, mode="eval")

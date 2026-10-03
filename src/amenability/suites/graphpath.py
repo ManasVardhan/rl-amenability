@@ -25,19 +25,27 @@ import re
 from collections import deque
 
 from amenability.suites.base import TaskItem
+from amenability.suites.countdown import SCAFFOLD_HEAD, SCAFFOLD_TAIL
 
 SUITE_NAME = "probe_graphpath"
 EXTRA_EDGES_DIVISOR = 3
 MIN_DISTANCE = 3
 
+# Same TinyZero base-model scaffold as Countdown (transfer-rulings T19). The
+# example path uses X, Y and Z, which no item can contain (labels stop at L for the
+# default buckets, and `generate_graphpath` refuses buckets above 23 nodes), so it
+# never verifies; every consumer scores the completion alone in any case.
 PROMPT = (
-    "An undirected graph has these edges: {edges}.\n"
-    "Find a path from {source} to {target} that only uses these edges and visits no "
-    "node twice.\n"
-    "Put only the path, as node names joined by ->, inside <answer></answer> tags."
+    SCAFFOLD_HEAD
+    + "An undirected graph has these edges: {edges}. Find a path from {source} to "
+    "{target} that only uses these edges and visits no node twice. Show your work in "
+    "<think> </think> tags. And return the final answer in <answer> </answer> tags, "
+    "as node names joined by ->, for example <answer> X -> Y -> Z </answer>."
+    + SCAFFOLD_TAIL
 )
 
 _NODE_RE = re.compile(r"[A-Z]")
+_MAX_NODES = 23  # labels A..W; X, Y, Z are reserved for the prompt's example path
 
 
 def _labels(n: int) -> list[str]:
@@ -88,6 +96,11 @@ def _edge_string(edges: set[frozenset[str]]) -> str:
 
 
 def generate_graphpath(n: int, seed: int, buckets: tuple[int, ...] = (8, 10, 12)) -> list[TaskItem]:
+    if max(buckets) > _MAX_NODES:
+        raise ValueError(
+            f"bucket of {max(buckets)} nodes would use labels that collide with the "
+            f"prompt's example path X -> Y -> Z; at most {_MAX_NODES} nodes"
+        )
     rng = random.Random(seed)
     items: list[TaskItem] = []
     per_bucket = n // len(buckets)
