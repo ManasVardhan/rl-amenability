@@ -82,7 +82,19 @@ login node: its per-user thread cap makes uv's thread pool crash with EAGAIN.
     # wait; then:
     grep -c '"ok": true' results/transfer/prefetch.json    # must print 10
 
-## 2. Calibration pilot (20 GPU jobs, pre-eval only, ~10 min each)
+## 2. Calibration pilot (20 GPU jobs, pre-eval only, ~30 min each)
+
+Measured on the first pilot: about 30 min per pre-eval job (300 items x 64
+samples = 19,200 generations at about 12 per second on an A100 40GB), not the
+10 min first estimated.
+
+Before rerunning the pilot after the prompt change (transfer-rulings T19), delete
+every pre-eval result made with the old prompts. The pipeline skips any job
+whose output file exists, so a stale file is silently reused:
+
+    rm results/transfer/preeval/falcon3-1b-base-countdown.json
+    ls results/transfer/preeval/    # must list nothing from before T19
+
 
     uv run python -m scripts.make_transfer_jobs --pilot
     JOBS_FILE=results/transfer/jobs_pilot.txt EXTRA_ARGS=--pre-only \
@@ -105,7 +117,12 @@ every model's training protocol runs on the same hardware.
     # lines 0 and 1 are the countdown seed-0 jobs for the two models.
     # Then read results/transfer/meta/*.json: peak_train_bytes and wall_seconds.
 
-## 4. The batch (30 GPU jobs, ~1 h each)
+## 4. The batch (30 GPU jobs, over 1 h each)
+
+Each batch job runs two pre-eval-sized evaluations (pre and post, about 30 min
+each at the pilot's measured rate) plus 60 GRPO steps, so expect well over the
+first estimate of 1 h. The array requests 3 h; read the smoke probes'
+`wall_seconds` before submitting and raise `--time` if they come close.
 
     uv run python -m scripts.make_transfer_jobs
     sbatch --array=0-29%8 scripts/slurm/probe_array.sbatch

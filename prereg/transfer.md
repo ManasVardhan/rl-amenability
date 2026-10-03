@@ -21,6 +21,21 @@ below:
 - Telemetry is validated against its meta file; a mismatch is a named job
   failure (T10).
 
+## Amendment of 2026-10-03
+
+Made on 2026-10-03, before any batch data existed, from the calibration pilot.
+The pilot is pre-batch calibration, not scored, and no probe (training) job had
+run. One change, recorded as ruling T19 in `docs/decisions/transfer-rulings.md`
+and edited into the sections below:
+
+- Both probe suites prompt with the TinyZero base-model completion scaffold
+  (User/Assistant framing, a format example, and a prompt ending inside an
+  opened `<think>` block), because Falcon3-1B-Base's pilot completions on the
+  bare-instruction prompt never attempted the task (pass@64 0.003, 0 on the
+  3-number bucket). The Countdown verifier also accepts one trailing
+  "= <target>" in the answer. Pilot results produced with the old prompts are
+  deleted and rerun; none is used.
+
 ## Question
 
 Q1, probe invariance: does a model's probe score depend on which probe suite
@@ -47,6 +62,10 @@ replicate on Countdown. No ground truth is involved.
   protocol above (`ProbeConfig()` defaults, item seed 0) and a number of step
   records equal to probe_steps. A missing, unreadable or mismatched meta makes
   the job a named failure, like a missing telemetry file.
+- Prompts (amended, T19): the TinyZero base-model scaffold for both suites, as
+  defined by `PROMPT` in `src/amenability/suites/countdown.py` and
+  `src/amenability/suites/graphpath.py`. Every reward and pass@k is computed on
+  the completion alone, never on prompt plus completion.
 - Items: generated from item seed 0 for every arm. Run seed 0 for the two suite
   arms, run seed 1 for the Countdown replicate.
 - Statistics: `spearman_with_ci` (percentile bootstrap, permutation p, 10,000

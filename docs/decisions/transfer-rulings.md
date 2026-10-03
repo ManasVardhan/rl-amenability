@@ -256,3 +256,63 @@ stay on `--gres=gpu:a100:1`, so every model's protocol runs on the same
 hardware. Pilot numbers are calibration, not scored, and tiny cross-GPU numeric
 differences cannot meaningfully flip the floored or saturated flags.
 *Cost if wrong:* a borderline calibration flag differs on rerun.
+
+**T19. The probe prompts use the TinyZero base-model completion scaffold.**
+Written from a real CARC pilot result, before any batch data. Falcon3-1B-Base
+scored pre-probe pass@64 = 0.003 on Countdown and exactly 0 on the easiest
+(3-number) bucket. Sampled completions showed no attempt at any problem: the
+prompts ended in a bare instruction ("Put only the expression inside
+<answer></answer> tags."), which a base model reads as the start of a web
+document and continues with forum rules or FAQ sections. The pilot was measuring
+format compliance, not capability, and a GRPO probe on those prompts would get
+all-zero reward. Both probe suites now use the TinyZero Countdown template (also
+used by Gandhi et al. 2025, "Cognitive Behaviors that Enable Self-Improving
+Reasoners"): a "conversation between User and Assistant" preamble, the task as
+the User turn with "Show your work in <think> </think> tags. And return the final
+answer in <answer> </answer> tags, for example ...", and a prompt that ends in
+"Assistant: Let me solve this step by step.\n<think>\n", so the model's
+continuation is the reasoning and then the answer. Countdown keeps its semantics:
+the wording says "each number must be used exactly once" (TinyZero's "can only be
+used once" is looser than our verifier, which requires every number), and the
+example is `(1 + 2) / 3`, whose value 1 is below every target (10 to 400). Graph
+path uses the same framing and opener with the example `X -> Y -> Z`; node labels
+stop at L, so no item can contain those nodes. Neither example can verify for
+any item, and tests prove that scoring the whole prompt as if it were a
+completion gives 0 on all 300 items of each suite.
+The prompt scaffold was preferred over two alternatives. (a) Prefilling
+"<answer>" as the end of the prompt forces format but suppresses the reasoning
+that RLVR amplifies, so the probe would measure a different behaviour from the
+one the target training rewards. (b) Few-shot prompting inflates pre-scores by
+an amount that depends on how well each model in-context learns, which is a
+model-dependent confound in a ranking study, and it lengthens every prompt.
+The Countdown verifier now tolerates exactly one trailing "= <target>" inside
+the answer tag, for example `<answer> (20 - 9) + 4 = 15 </answer>`: such an
+answer is a true statement that a strict parser rejected only for its form.
+Any other "=" (a wrong right-hand side, a chain such as `e = 15 = 15`, or the
+target on the left) still scores 0, and the stripped expression must still use
+every number exactly once and equal the target. Graph path's verifier is
+unchanged; it already tolerated spaces around "->" and inside the tags, which
+the new example uses. Every consumer scores the completion alone: vLLM returns
+only generated text to `evaluate_passk`, TRL passes completions separately from
+prompts to the reward function, and the SFT records pair the prompt with the
+text that follows it. `by_prompt` attribution still holds, since every prompt is
+still unique. Prompt lengths are at most 157 (Countdown) and 192 (Graph) tokens
+under the SmolLM2 tokenizer, inside `EntropyProbe`'s 256-token truncation. The
+pass@k budget of 768 new tokens leaves room for the reasoning block; GRPO uses
+TRL's default `max_completion_length` of 512, which this ruling records but does
+not change, and a truncated completion earns reward 0. Item generation consumes
+the same random stream as before, so the items' numbers, graphs and answers,
+and T1's guessability figures, are unchanged; only the prompt text changed.
+The stale pilot result `results/transfer/preeval/falcon3-1b-base-countdown.json`
+on CARC must be deleted before the pilot is rerun, because `run_probe` skips any
+pre-eval or probe job whose output file already exists. Any other pre-eval or
+telemetry file produced with the old prompts must be deleted (or the job rerun
+with `--force`) for the same reason. `prereg/transfer.md` is amended.
+*Cost if wrong:* the scaffold suits base models, and an instruct model in the
+roster would see an unfamiliar plain-text conversation instead of its chat
+template; the roster is base models only, so this is not expected to bite. A
+base model that finishes its answer may continue the transcript with an invented
+next "User:" turn and a second answer tag, and the verifier takes the last tag;
+if pilot completions show this, the remedy is a stop string or truncation at the
+next turn, recorded in a further ruling. The trailing-"=" tolerance makes
+Countdown slightly more lenient than TinyZero's reward, uniformly across models.
