@@ -3,13 +3,17 @@
 # One probe job per array task. Line (SLURM_ARRAY_TASK_ID + 1) of $JOBS_FILE is
 # "model suite seed". Launch with, e.g.:
 #   sbatch --array=0-29%8 scripts/slurm/probe_array.sbatch
-# The gres below takes any A100 (40 or 80 GB). If the smoke probe's
-# peak_train_bytes exceeds 36e9, add --constraint=a100-80gb to the sbatch line
-# (see scripts/slurm/README.md, section 4). No --account line: anakano_429 is the
+# Training jobs run on an 80 GB A100 (transfer-rulings T22): SmolLM2-1.7B ran
+# out of memory at step 1 on a 40 GB card in the smoke probes. CARC feature
+# names are a100-40gb and a100-80gb. A pre-eval-only job (EXTRA_ARGS=--pre-only)
+# may override both lines on the sbatch command line, e.g.
+#   --gres=gpu:1 --constraint="a100|l40s|a40"
+# (see scripts/slurm/README.md, section 2). No --account line: anakano_429 is the
 # default account.
 #SBATCH --job-name=amen-probe
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:a100:1
+#SBATCH --constraint=a100-80gb
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00

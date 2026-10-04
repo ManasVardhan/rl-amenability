@@ -112,36 +112,59 @@ every model's training protocol runs on the same hardware.
 
 ## 3. Smoke probes (2 GPU jobs)
 
+`probe_array.sbatch` requests an 80 GB A100 by default (`--constraint=a100-80gb`,
+transfer-rulings T22). The first smoke run (job 12633929) used the 40 GB cards,
+where SmolLM2-1.7B ran out of memory at step 1. Its outputs used the 512-token
+completion cap and the old buckets, so delete them before any rerun or the
+batch; the pipeline skips every job whose telemetry exists:
+
+    rm -f results/transfer/meta/*.json results/transfer/manifests/*.json results/transfer/telemetry/*.json
+    rm -rf results/transfer/probes/*
+
+Then:
+
     uv run python -m scripts.make_transfer_jobs --only-model smollm2-1.7b qwen2.5-0.5b --out results/transfer/jobs_smoke.txt
     JOBS_FILE=results/transfer/jobs_smoke.txt sbatch --array=0,1 scripts/slurm/probe_array.sbatch
     # lines 0 and 1 are the countdown seed-0 jobs for the two models.
-    # Then read results/transfer/meta/*.json: peak_train_bytes and wall_seconds.
+    # Then read results/transfer/meta/*.json: peak_train_bytes_excl_vllm_pool and wall_seconds.
+
+Do not add a `--constraint` to this line: the script's a100-80gb is the
+training hardware for every model.
 
 GRPO generates its rollouts with a vLLM engine colocated with the trainer, in
-sleep mode, stopping at the first `</answer>` (transfer-rulings T21). The smoke
-probes are the first GPU run of that path. For each smoke job, check:
+sleep mode, stopping at the first `</answer>` (transfer-rulings T21), with a
+768-token cap (T22). For each smoke job, check:
 
     # the stop works in training: a few characters at most after the first
     # </answer> (a loop would show hundreds), and most completions carry it
-    uv run --no-sync python -c "import json,glob; [print(f, m['generation_backend'], m['generation_stop'], m['completion_stats']) for f in glob.glob('results/transfer/manifests/*.json') for m in [json.load(open(f))]]"
-    # generation_backend must be vllm_colocate; generation_stop must be </answer>
+    uv run --no-sync python -c "import json,glob; [print(f, m['generation_backend'], m['generation_stop'], m['max_completion_length'], m['completion_stats']) for f in glob.glob('results/transfer/manifests/*.json') for m in [json.load(open(f))]]"
+    # generation_backend must be vllm_colocate; generation_stop must be </answer>;
+    # max_completion_length must be 768
     # the colocated engine and the trainer were released before the post-eval
     # (issue #33): allocated_after_train_bytes near zero, under 1e9
     grep -h allocated_after_train_bytes results/transfer/meta/*.json
     # no engine start-up failure and no traceback
     grep -l "less than desired GPU memory utilization\|Traceback" logs/probe_*.out
 
-TRL's per-step log lines should show `completions/mean_length` well under 512.
+TRL's per-step log lines should show `completions/mean_length` well under 768.
 Its `completions/clipped_ratio` reads near 1.0 on the probe suites and is not a
 failure: it counts every completion that does not end in EOS, and one ended by
-the stop string does not. The engine sleeps (weights and KV cache released)
-during the trainer's forward and backward passes, so `peak_train_bytes` is still
-the training peak that the 40 GB decision below needs, whether or not torch's
-counter sees the engine's sleep-mode pool; the 36e9 threshold is unchanged. If the job dies with a CuMemAllocator or
-expandable-segments error, check that `PYTORCH_CUDA_ALLOC_CONF` is unset: vLLM's
-sleep mode cannot run with `expandable_segments:True`.
+the stop string does not.
+
+Memory figures (T22): `peak_train_bytes` is torch's `max_memory_allocated`
+over training, and it over-reports. vLLM's sleep mode releases the engine's
+physical memory but torch still counts the engine's pool as allocated, so the
+raw figure is the trainer's peak plus the whole pool (Gemma-3-1B reported
+45.6e9 on a 42.4e9-byte card). Read `peak_train_bytes_excl_vllm_pool` (raw
+peak minus `vllm_sleep_pool_bytes`) as the trainer-phase peak. If the job dies
+with a CuMemAllocator or expandable-segments error, check that
+`PYTORCH_CUDA_ALLOC_CONF` is unset: vLLM's sleep mode cannot run with
+`expandable_segments:True`.
 
 ## 4. The batch (30 GPU jobs, over 1 h each)
+
+Do not launch before the difficulty calibration (section 6) has selected the
+training-pool candidates under the T22 selection rule.
 
 Each batch job runs two pre-eval-sized evaluations (pre and post, about 30 min
 each at the pilot's measured rate) plus 60 GRPO steps, so expect well over the
@@ -151,12 +174,9 @@ first estimate of 1 h. The array requests 3 h; read the smoke probes'
     uv run python -m scripts.make_transfer_jobs
     sbatch --array=0-29%8 scripts/slurm/probe_array.sbatch
 
-If section 3 showed `peak_train_bytes` above 36e9 for either model, a 40 GB A100 is
-too tight; request the 80 GB nodes instead:
-
-    sbatch --constraint=a100-80gb --array=0-29%8 scripts/slurm/probe_array.sbatch
-
-Jobs whose telemetry already exists (the smoke probes) exit in seconds.
+Every batch job runs on an 80 GB A100 (the script's default constraint, T22);
+there is no 40 GB variant of the batch. Jobs whose telemetry already exists
+(the smoke probes) exit in seconds.
 
 ## Monitoring and reruns
 
@@ -165,7 +185,7 @@ Jobs whose telemetry already exists (the smoke probes) exit in seconds.
     # manifest was never generated)
     grep -l "command not found\|job list not found" logs/probe_*.out logs/prefetch_*.out
     grep -l Traceback logs/probe_*.out
-    # rerun failed batch tasks by id (keep --constraint if section 4 used it):
+    # rerun failed batch tasks by id (the script keeps the 80 GB constraint):
     sbatch --array=4,17 scripts/slurm/probe_array.sbatch
 
 If tasks fail at vLLM engine warmup with `Could not find nvcc` raised from
