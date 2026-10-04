@@ -117,6 +117,30 @@ every model's training protocol runs on the same hardware.
     # lines 0 and 1 are the countdown seed-0 jobs for the two models.
     # Then read results/transfer/meta/*.json: peak_train_bytes and wall_seconds.
 
+GRPO generates its rollouts with a vLLM engine colocated with the trainer, in
+sleep mode, stopping at the first `</answer>` (transfer-rulings T21). The smoke
+probes are the first GPU run of that path. For each smoke job, check:
+
+    # the stop works in training: a few characters at most after the first
+    # </answer> (a loop would show hundreds), and most completions carry it
+    uv run --no-sync python -c "import json,glob; [print(f, m['generation_backend'], m['generation_stop'], m['completion_stats']) for f in glob.glob('results/transfer/manifests/*.json') for m in [json.load(open(f))]]"
+    # generation_backend must be vllm_colocate; generation_stop must be </answer>
+    # the colocated engine and the trainer were released before the post-eval
+    # (issue #33): allocated_after_train_bytes near zero, under 1e9
+    grep -h allocated_after_train_bytes results/transfer/meta/*.json
+    # no engine start-up failure and no traceback
+    grep -l "less than desired GPU memory utilization\|Traceback" logs/probe_*.out
+
+TRL's per-step log lines should show `completions/mean_length` well under 512.
+Its `completions/clipped_ratio` reads near 1.0 on the probe suites and is not a
+failure: it counts every completion that does not end in EOS, and one ended by
+the stop string does not. The engine sleeps (weights and KV cache released)
+during the trainer's forward and backward passes, so `peak_train_bytes` is still
+the training peak that the 40 GB decision below needs, whether or not torch's
+counter sees the engine's sleep-mode pool; the 36e9 threshold is unchanged. If the job dies with a CuMemAllocator or
+expandable-segments error, check that `PYTORCH_CUDA_ALLOC_CONF` is unset: vLLM's
+sleep mode cannot run with `expandable_segments:True`.
+
 ## 4. The batch (30 GPU jobs, over 1 h each)
 
 Each batch job runs two pre-eval-sized evaluations (pre and post, about 30 min
