@@ -279,3 +279,18 @@ def test_umask_is_read_once_at_import_and_matches_the_process_umask():
     current = os.umask(0)
     os.umask(current)
     assert run_mod._UMASK == current
+
+
+@pytest.mark.parametrize("suite_key", ["countdown", "graphpath"])
+def test_suite_stop_reaches_evaluation_and_training(tmp_path, fakes, suite_key):
+    # Transfer-rulings T20: probe completions end at the first </answer>.
+    stops = []
+    state, fake_passk, fake_train = fakes
+
+    def spy(model_path, items, verify_fn, ks, **kw):
+        stops.append(kw.get("stop"))
+        return fake_passk(model_path, items, verify_fn, ks, **kw)
+
+    _run(tmp_path, fakes, suite_key=suite_key, evaluate_fn=spy)
+    assert stops == ["</answer>", "</answer>"]
+    assert state["train_specs"][0].stop == "</answer>"

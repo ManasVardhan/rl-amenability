@@ -41,7 +41,7 @@ def test_evaluate_passk_with_injected_generator():
     # item 0: 2 of 4 correct. item 1: 0 of 4 correct.
     canned = {"t/0": ["1", "1", "0", "0"], "t/1": ["0", "0", "0", "0"]}
 
-    def fake_generate(model_path, prompts, n, temperature, seed):
+    def fake_generate(model_path, prompts, n, temperature, seed, stop=None):
         return [canned[tid] for tid in prompts.keys()]
 
     def verify(item, completion):
@@ -65,7 +65,7 @@ def test_duplicate_task_ids_raise():
         TaskItem(task_id="t/0", suite="s", prompt="p2", answer="1", difficulty=0),
     ]
 
-    def fake_generate(model_path, prompts, n, temperature, seed):
+    def fake_generate(model_path, prompts, n, temperature, seed, stop=None):
         return [["1"] * n for _ in range(len(prompts))]
 
     def verify(item, completion):
@@ -84,7 +84,7 @@ def test_generator_returning_wrong_number_of_results_raises():
         for i in range(2)
     ]
 
-    def fake_generate(model_path, prompts, n, temperature, seed):
+    def fake_generate(model_path, prompts, n, temperature, seed, stop=None):
         return [["1"] * n]  # Return only 1 result instead of 2
 
     def verify(item, completion):
@@ -103,7 +103,7 @@ def test_generator_returning_wrong_sample_count_raises():
         for i in range(2)
     ]
 
-    def fake_generate(model_path, prompts, n, temperature, seed):
+    def fake_generate(model_path, prompts, n, temperature, seed, stop=None):
         return [["1"] * 2, ["1"] * 1]  # Second item has only 1 sample instead of 2
 
     def verify(item, completion):

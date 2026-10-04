@@ -8,7 +8,7 @@ from typing import Callable
 from amenability.probe.callbacks import GroupedRewardRecorder, TelemetryCallback
 from amenability.probe.entropy import EntropyProbe
 from amenability.probe.telemetry import StepRecord
-from amenability.suites.base import TaskItem
+from amenability.suites.base import TaskItem, truncate_at_stop
 
 ENTROPY_BATCH_SIZE = 16
 
@@ -38,6 +38,17 @@ class GRPOSpec:
     seed: int
     output_dir: str
     save_steps: int | None
+    # Score each completion only up to the first occurrence of this string,
+    # inclusive (transfer-rulings T20). None means score the whole completion.
+    #
+    # Generation itself still runs to max_completion_length. This repo trains with
+    # TRL's transformers generate path (use_vllm is False), and TRL 1.13 calls
+    # model.generate without a tokenizer, so GRPOConfig(generation_kwargs=
+    # {"stop_strings": [...]}) would raise in transformers' StopStringCriteria
+    # setup at the first step. The loop tokens after the first </answer> therefore
+    # still sit in the completion mask and receive the group advantage; only the
+    # reward is computed on the truncated text.
+    stop: str | None = None
 
 
 def checkpoint_schedule(max_steps: int, save_steps: int | None) -> list[int]:
@@ -49,7 +60,7 @@ def checkpoint_schedule(max_steps: int, save_steps: int | None) -> list[int]:
     return steps
 
 
-def build_reward_fn(items: list[TaskItem], verify_fn) -> Callable:
+def build_reward_fn(items: list[TaskItem], verify_fn, stop: str | None = None) -> Callable:
     by_prompt = {it.prompt: it for it in items}
     if len(by_prompt) != len(items):
         raise ValueError(
@@ -68,7 +79,10 @@ def build_reward_fn(items: list[TaskItem], verify_fn) -> Callable:
         out = []
         for prompt, completion in zip(prompts, completions):
             item = by_prompt.get(prompt)
-            out.append(1.0 if item is not None and verify_fn(item, completion) else 0.0)
+            out.append(
+                1.0 if item is not None and verify_fn(item, truncate_at_stop(completion, stop))
+                else 0.0
+            )
         return out
 
     return reward_fn
@@ -82,7 +96,7 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         )
 
     recorder = GroupedRewardRecorder(num_generations=spec.num_generations)
-    reward_fn = recorder.wrap(build_reward_fn(spec.items, spec.verify_fn))
+    reward_fn = recorder.wrap(build_reward_fn(spec.items, spec.verify_fn, stop=spec.stop))
 
     if trainer_factory is None:
         from datasets import Dataset
@@ -150,6 +164,10 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         "temperature": spec.temperature,
         "seed": spec.seed,
         "n_items": len(spec.items),
+        # The reward is scored up to completion_stop; generation is not stopped
+        # there (see GRPOSpec.stop), so it runs to max_completion_length.
+        "completion_stop": spec.stop,
+        "generation_runs_to_cap": True,
         "expected_checkpoints": checkpoint_schedule(spec.max_steps, spec.save_steps),
         "n_step_records": len(callback.records),
     }

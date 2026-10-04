@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from amenability.suites.base import TaskItem
+from amenability.suites.base import ANSWER_STOP, TaskItem
 from amenability.suites.countdown import generate_countdown, verify_countdown
 from amenability.suites.graphpath import SUITE_NAME as GRAPHPATH_NAME
 from amenability.suites.graphpath import generate_graphpath, verify_graphpath
@@ -21,6 +21,9 @@ class ProbeSuite:
     name: str
     generate: Callable[[int, int], list[TaskItem]]
     verify: Callable[[TaskItem, str], bool]
+    # Generation stops at the first occurrence (transfer-rulings T20). Both probe
+    # suites answer in <answer> tags; None would mean "no stop".
+    stop: str | None = ANSWER_STOP
 
 
 PROBE_SUITES: dict[str, ProbeSuite] = {

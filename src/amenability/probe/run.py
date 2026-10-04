@@ -133,6 +133,7 @@ def run_probe(
         return evaluate(
             path, items, suite.verify, config.ks,
             n_samples=config.n_samples, temperature=config.temperature, seed=run_seed,
+            stop=suite.stop,
         )
 
     if pre_only:
@@ -176,7 +177,7 @@ def run_probe(
             verify_fn=suite.verify, max_steps=config.probe_steps,
             num_generations=config.num_generations, learning_rate=config.learning_rate,
             beta=config.beta, temperature=config.temperature, seed=run_seed,
-            output_dir=str(out_dir), save_steps=None,
+            output_dir=str(out_dir), save_steps=None, stop=suite.stop,
         )
     )
     wall["train"] = time.monotonic() - t0

@@ -3,6 +3,22 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# Transfer-rulings T20: a base model under the T19 scaffold does not stop after its
+# first </answer>; it loops think/answer blocks until max_tokens. Every path that
+# samples completions for a tagged suite stops at (or truncates to) the first
+# occurrence of this string, keeping the string itself so the answer regex matches.
+ANSWER_STOP = "</answer>"
+
+
+def truncate_at_stop(text: str, stop: str | None) -> str:
+    """Cut text just after the first occurrence of stop (inclusive); unchanged if
+    stop is None or absent."""
+    if not stop:
+        return text
+    i = text.find(stop)
+    return text if i < 0 else text[: i + len(stop)]
+
+
 class SuiteOverlapError(Exception):
     """Raised when suites share task IDs, which would let a probe see target data."""
 

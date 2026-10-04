@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from amenability.suites.base import TaskItem
+from amenability.suites.base import TaskItem, truncate_at_stop
 
 
 def build_rejection_dataset(
@@ -11,13 +11,19 @@ def build_rejection_dataset(
     completions_by_task: dict[str, list[str]],
     verify_fn: Callable[[TaskItem, str], bool],
     max_per_prompt: int = 4,
+    stop: str | None = None,
 ) -> list[dict]:
+    """stop: cut each completion just after the first occurrence of this string
+    before it is verified, deduplicated and used as a target (transfer-rulings
+    T20), so SFT never teaches the think/answer loop a base model emits after its
+    first </answer>. Pass the probe suite's stop; None (gsm8k) keeps the text."""
     records: list[dict] = []
     for it in items:
         seen: set[str] = set()
         for completion in completions_by_task.get(it.task_id, []):
             if len(seen) >= max_per_prompt:
                 break
+            completion = truncate_at_stop(completion, stop)
             norm = completion.strip()
             if norm in seen or not verify_fn(it, completion):
                 continue
