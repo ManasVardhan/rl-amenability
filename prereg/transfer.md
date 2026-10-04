@@ -68,6 +68,26 @@ and edited into the sections below:
   sleeps during the trainer's forward and backward passes; the 36e9 rule for
   80 GB nodes is unchanged.
 
+## Amendment of 2026-10-04
+
+Made on 2026-10-04, before any batch data existed, from the GPU smoke probes
+(job 12633929) and the calibration pilot. Approved by the owner. Recorded as
+ruling T22 in `docs/decisions/transfer-rulings.md` and edited into the sections
+below:
+
+- GRPO `max_completion_length` is pinned to 768, the pass@k token budget,
+  instead of TRL's default of 512.
+- Training jobs run on 80 GB A100s. The smoke outputs of job 12633929 are
+  deleted before the batch and none is used; the learning-rate rule below is
+  evaluated on the rerun smoke.
+- `peak_train_bytes` over-reports by vLLM's sleep-mode pool; the meta adds the
+  pool's size and the peak without it. A reported figure, not a protocol
+  quantity.
+- The probe item pool's difficulty is chosen before the batch by a difficulty
+  calibration with a pre-registered selection rule based on pass@8 group
+  signal, not on the pass@32 floored rule. Named candidates, the rule and its
+  no-launch outcome are in T22 and in "Training-pool difficulty" below.
+
 ## Question
 
 Q1, probe invariance: does a model's probe score depend on which probe suite
@@ -78,7 +98,8 @@ replicate on Countdown. No ground truth is involved.
 
 - Protocol: the Stage 0 probe protocol, unchanged. 60 GRPO steps, 8 generations,
   4 prompts per optimiser step, lr 1e-6, beta 0.04, temperature 1.0, 300 items in
-  three buckets, pass@k at (1, 8, 32, 64) from 64 samples.
+  three buckets, pass@k at (1, 8, 32, 64) from 64 samples. GRPO rollouts are
+  capped at 768 tokens, the pass@k budget (amended, T22).
 - Score: `amenability_score` from `src/amenability/scoring/score.py`, applied per
   suite across the ten roster models.
 - Common-set scoring (amended, T8): the score is relative to the roster it is
@@ -124,10 +145,40 @@ is saturated in 3 or more models, the batch stops before launch for a ruling
 (see `docs/decisions/transfer-rulings.md`, T4). This is decided before any model
 has run.
 
-Bucket changes decided at the calibration pilot (Countdown floored, the Graph
-(7, 9, 11) contingency, or a Graph breadth-saturation remedy) are pre-batch
-calibration. Each is recorded as a ruling before the batch launches, and none is
-a protocol change after data.
+Amended (T22): the floored flag is descriptive and no longer decides the
+training pool's difficulty. Its one remaining use is to exempt the models it
+flags from condition (a) below; in the pilot that is stablelm-2-1.6b on both
+suites. Bucket changes decided at calibration are pre-batch calibration,
+recorded as a ruling before the batch launches, and none is a protocol change
+after data.
+
+### Training-pool difficulty (amended, T22)
+
+GRPO with a group of 8 learns from a prompt only if one of its 8 rollouts is
+correct, so the pass@8 group signal, not pass@32, governs the training pool's
+difficulty. Before the batch, `scripts/calibrate_difficulty.py` samples 8
+completions per item, with the GRPO rollout sampling, over the 300-item pool of
+every named candidate in `src/amenability/suites/difficulty.py`, for the nine
+pilot models, and reports per bucket and pool the group-signal rate (items with
+at least one correct of 8), pass@1, pass@8 and a failure taxonomy (no answer
+tag, unparseable answer, parseable but wrong, correct).
+
+Selection rule, applied mechanically by `scripts/analyze_calibration.py`: per
+suite, take the candidate closest to current (candidates ordered hardest to
+easiest; a Graph candidate only if its informed-guesser pass@32 is inside the
+T1 bound, < 0.3 per bucket and < 0.15 on average) such that
+
+- (a) every model not floored on that suite in the pilot has group-signal rate
+  >= 0.15 over the candidate's pool, and
+- (b) the best model's pass@1 is <= 0.80 (headroom; not saturated).
+
+If no candidate satisfies (a), the report names the failing models and whether
+each fails mostly on format (no answer tag plus unparseable answer >= 50% of its
+samples) or on search, and the batch does NOT launch; the owner decides among
+remedies listed but not implemented (a partial format reward as in TinyZero, a
+larger group size, or accepting zero-signal models). If a candidate satisfies
+(a) but none satisfies both, the batch also does not launch. The selected
+candidate is the suite's item pool for training and for the pre- and post-eval.
 
 ## Decision rule
 

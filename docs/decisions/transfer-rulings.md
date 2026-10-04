@@ -527,3 +527,152 @@ on-policy, as is standard for short colocated runs, uniformly across models. If
 the smoke shows a large train/inference mismatch (TRL logs no ratio while the
 correction is off), turning the correction on is a loss change and needs its
 own ruling.
+
+**T22. Pre-batch amendment after the GPU smoke probes: a 768-token rollout cap,
+80 GB A100s for training, a corrected memory figure, and a pre-registered
+difficulty calibration with a pass@8-based selection rule.**
+Made on 2026-10-04, before any batch data existed. The smoke probes (job
+12633929, T21 code at 003a511; issue #44) and the calibration pilot (job
+12630546; issue #21) are pre-batch calibration. Approved by the owner.
+*What the smoke showed.* (1) GRPO gives no learning signal to weak models: the
+zero-advantage rate was 1.00 for gemma-3-1b-pt and 0.99 for qwen2.5-0.5b on
+Countdown, train reward 0 at almost every step, and post = pre. With a group of
+8 a prompt yields a gradient only if one of its 8 rollouts is correct, and on
+pilot pass@8 about 5 of 9 models almost never get there. The pilot's "floored"
+rule (pass@32 < 0.02 in every bucket) is the wrong criterion for GRPO, which
+needs success within the group size. (2) 70% of qwen2.5-0.5b's rollouts hit the
+512-token cap before `</answer>`, although its pre-eval had 768. (3)
+smollm2-1.7b ran out of memory at step 1 on a 40 GB A100. (4) The pilot showed
+weak models far below the T1 informed guesser on Graph bucket 8 (about 0.02
+against 0.21) and prose inside `<answer>` on Countdown, so much of their failure
+may be answer format, not search; easier puzzles do not fix format. The
+calibration below measures which it is.
+*Changes.*
+1. `max_completion_length` is pinned to 768 (`grpo.MAX_COMPLETION_LENGTH`, tied
+   to `passk.PASSK_MAX_TOKENS`) instead of TRL's default of 512, and recorded in
+   the run manifest. The rollout filters (top_p 1.0, top_k 0, no min_p, no
+   repetition penalty) are now named constants passed explicitly, with the same
+   values as before. `vllm_max_model_length` 2048 still holds the longest prompt
+   plus 768: the longest probe prompt of any candidate below is 624 characters,
+   an upper bound on its tokens, and `check_fits_vllm_context` still refuses an
+   item set that would not fit.
+2. `probe_array.sbatch` requests `--constraint=a100-80gb` by default; every
+   training job (smoke and batch) runs on an 80 GB A100. Pre-eval-only jobs may
+   still override gres and constraint on the sbatch line (T18). The 36e9 rule
+   for choosing 80 GB nodes is retired.
+3. The smoke outputs of job 12633929 (`results/transfer/{meta,manifests,telemetry,probes}/*`)
+   used the 512 cap and the old buckets. They must be deleted before the batch
+   (the pipeline reuses any existing telemetry) and none is used.
+   `scripts/slurm/README.md` section 3 gives the command. The pre-registered
+   Qwen2.5-0.5B learning-rate rule reads "the Qwen2.5-0.5B Countdown smoke
+   probe"; since that smoke result is discarded, the rule is evaluated on the
+   rerun smoke under the amended protocol, not on job 12633929.
+4. `peak_train_bytes` over-reports under sleep mode, by the size of vLLM's
+   sleep-mode pool. Mechanism (vLLM `device_allocator/cumem.py`): with sleep mode
+   on, the colocated engine allocates its weights and KV cache through a torch
+   `MemPool` backed by vLLM's cuMem allocator. `sleep()` unmaps and releases the
+   physical memory behind each allocation but keeps the tensors, so torch's
+   caching allocator still counts every byte as allocated, asleep or awake.
+   `torch.cuda.max_memory_allocated` is therefore the trainer's peak plus the
+   whole pool, whichever phase the peak falls in. gemma-3-1b-pt's 45.6e9 on a
+   42.4e9-byte card is that sum: the pool is about 0.3 x 42.4e9 = 12.7e9, leaving
+   about 33e9 of trainer peak, which fits the card as the job did.
+   qwen2.5-0.5b's 30.1e9 is likewise about 17.4e9 of trainer peak. Fix:
+   `run_grpo` reads the pool's size (`vllm_sleep_pool_bytes`, the sum of the
+   cuMem allocator's allocations) before shutting the engine down and records it
+   in the run manifest; the probe meta keeps the raw `peak_train_bytes` and adds
+   `vllm_sleep_pool_bytes` and `peak_train_bytes_excl_vllm_pool` (raw minus
+   pool), the trainer-phase peak. The generation-phase peak (trainer state plus
+   the awake pool) is bounded by the raw figure. Not verified on a GPU yet; the
+   rerun smoke will show it.
+5. Difficulty knobs and named candidates, no default change.
+   `generate_countdown` takes `number_range` and `target_range`,
+   `generate_graphpath` takes `min_distance` and `extra_edges_divisor` (None for
+   a tree), both take an `id_namespace`. Defaults reproduce the pilot's items
+   byte for byte (a test pins the sha256 of each 300-item output at 003a511), so
+   the T1 guesser test is unchanged. `src/amenability/suites/difficulty.py`
+   lists the candidates, hardest first within each suite; this order is
+   pre-registered. Every candidate except `*-current` namespaces its task IDs by
+   its name, so IDs are unique across candidates and disjoint from the target
+   suites (a registry test registers all of them beside a target suite).
+
+   | candidate | parameters | informed guesser pass@32 (T1 method) | eligible |
+   |---|---|---|---|
+   | cd-current | 3/4/5 numbers, 1..20, targets 10..400 | n/a | yes |
+   | cd-easy | 2/3/4 numbers, 1..20, targets 10..400 | n/a | yes |
+   | cd-mid | 2/3/4 numbers, 1..15, targets 5..200 | n/a | yes |
+   | cd-easier | 2/3/4 numbers, 1..10, targets 5..100 | n/a | yes |
+   | gp-current | 8/10/12 nodes, n // 3 extra edges, distance >= 3 | 0.21 / 0.10 / 0.03, mean 0.113 | yes |
+   | gp-contingency | 7/9/11 nodes, n // 3, distance >= 3 | 0.37 / 0.12 / 0.06, mean 0.183 | no |
+   | gp-sparse-7 | 7/9/11 nodes, n // 6 (one extra edge), distance >= 3 | 0.27 / 0.10 / 0.02, mean 0.130 | yes |
+   | gp-tree-6 | 6/8/10-node trees, distance >= 4 | 0.20 / 0.04 / 0.01, mean 0.083 | yes |
+   | gp-tree-6s | 6/7/8-node trees, distance >= 4 | 0.20 / 0.06 / 0.06, mean 0.107 | yes |
+
+   Guesser rates are measured as in T1 (the candidate's 300 items from item seed
+   0, k = 32, guesser seed 0) and held by a test. Eligible means inside the T1
+   bound: < 0.3 in every bucket and < 0.15 on average. cd-mid is added as a step
+   between cd-easy and cd-easier, in case cd-easier saturates the strongest
+   model (condition (b) below). Graph candidates lower difficulty by node count,
+   the one axis that drove pilot difficulty monotonically in every model;
+   smaller graphs alone raise the guesser above the bound (gp-contingency, and
+   6/8/10 nodes with n // 3 extra edges reaches 0.64 at 6 nodes), so the
+   eligible small candidates offset it with fewer extra edges (fewer valid
+   paths) or a longer minimum distance. Whether trees and longer distances are
+   easier for the models than the current graphs is not assumed; the
+   calibration measures it. An ineligible candidate is still sampled, for
+   information, and can never be selected.
+6. Difficulty calibration (`scripts/calibrate_difficulty.py`,
+   `scripts/slurm/calibrate.sbatch`; pre-batch, not scored). For each of the
+   nine pilot models and each candidate: the candidate's full 300-item pool
+   (100 per bucket, item seed 0, which is exactly what a probe job would train
+   on, rather than a 60-per-bucket sample), 8 samples per item with the GRPO
+   rollout sampling (temperature 1.0, top_p 1.0, top_k 0, 768 tokens, stop at
+   the first `</answer>` kept in the output; a test checks these against the
+   built `GRPOConfig`). The only difference from TRL is mechanical: one request
+   with n = 8 and a seed instead of eight n = 1 requests without one. Reported
+   per bucket and over the pool: pass@1, pass@8 (the unbiased estimator; with
+   n = k = 8 it equals the next quantity), the group-signal rate (fraction of
+   items with at least one correct of 8, the expected share of GRPO groups with
+   a nonzero advantage), and a failure taxonomy over all samples:
+   `no_answer_tag` (no closed answer block, including a completion cut at the
+   cap), `unparseable_answer` (a block that is not an expression in the task's
+   grammar, allowing one trailing "= <integer>", or not node letters joined by
+   `->`; prose lands here), `parseable_wrong` (well formed, rejected by the
+   verifier: wrong numbers, value or right-hand side, division by zero; wrong
+   endpoints, non-edge, repeat, single node) and `correct` (the suite's own
+   verifier accepts it). The classifier reuses the suites' extraction and
+   verifiers; "correct" holds if and only if the verifier accepts.
+*Selection rule (pre-registered here, before any calibration data).* Per suite,
+walk the candidates in the order above (hardest first), skipping guesser-
+ineligible graph candidates, and select the first such that, over the
+candidate's 300-item pool:
+ (a) every model NOT floored on that suite in the pilot (pilot floored rule;
+     only stablelm-2-1.6b, on both suites) has group-signal rate >= 0.15; a
+     roster model with no calibration result fails (a); and
+ (b) the best model's pass@1 (over all nine models) is <= 0.80.
+Both thresholds are inclusive. The selected candidate becomes that suite's
+probe item pool for the batch (the probe trains and pre/post-evaluates on the
+same 300 items, so both follow it); wiring the selection into `ProbeConfig` and
+the catalog is a separate change made after the calibration, recorded in a
+further ruling, and changes no other protocol quantity.
+If no candidate satisfies (a), `scripts/analyze_calibration.py` reports, on the
+easiest eligible candidate, each model failing (a) as *format* (no_answer_tag +
+unparseable_answer >= 50% of its samples) or *search* (otherwise). The batch then
+does NOT launch and the owner decides among remedies listed, not implemented: a
+partial format reward as in TinyZero (0.1 for a well-formed wrong answer), a
+larger group size, or accepting zero-signal models. If some candidate satisfies
+(a) but none satisfies (a) and (b) together, the batch also does not launch and
+the owner decides. The rule is applied by `select_candidate` in
+`src/amenability/eval/calibration.py`, which CPU tests cover.
+*Why the group-signal criterion governs.* The amenability score reads GRPO
+training dynamics, and a model whose groups are all-zero has no dynamics: its
+probe score is fixed near 0 by construction, and five such models would tie and
+leave the transfer test resting on four. Pass@32 measures what 32 tries can
+find; GRPO with a group of 8 sees only what 8 tries find.
+*Cost if wrong:* if the easier pools compress the strong models' headroom more
+than (b) catches, the conversion and retention features lose range at the top,
+and the batch will show it as smaller post-minus-pre gains for the strong
+models; (b) is the guard, and its threshold is a judgement. If the weak models'
+failures are format, no candidate passes (a) and the batch waits for an owner
+decision, which costs time, not data. If the trees or larger distances turn out
+harder for models, the rule simply does not select them.
