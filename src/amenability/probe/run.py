@@ -107,6 +107,14 @@ def _cuda():
     return torch.cuda if torch.cuda.is_available() else None
 
 
+def _sleep_pool_bytes(manifest: Path) -> int | None:
+    try:
+        value = json.loads(manifest.read_text()).get("vllm_sleep_pool_bytes")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return int(value) if value is not None else None
+
+
 def run_probe(
     *,
     model_path: str,
@@ -183,6 +191,13 @@ def run_probe(
     wall["train"] = time.monotonic() - t0
     peak_train = None if cuda is None else int(cuda.max_memory_allocated())
     allocated_after_train = None if cuda is None else int(cuda.memory_allocated())
+    # torch counts the colocated engine's sleep-mode pool as allocated even while
+    # its memory is released, so peak_train over-reports by the pool's size
+    # (transfer-rulings T22). run_grpo records the pool in its manifest.
+    sleep_pool = _sleep_pool_bytes(out_dir / "run_manifest.json") if cuda is not None else None
+    peak_train_excl_pool = (
+        peak_train - sleep_pool if peak_train is not None and sleep_pool is not None else None
+    )
 
     t0 = time.monotonic()
     post = evaluate_at(str(out_dir))
@@ -203,6 +218,8 @@ def run_probe(
         "peak_memory_bytes": None if cuda is None else max(pre_peak, int(cuda.max_memory_allocated())),
         "peak_train_bytes": peak_train,
         "allocated_after_train_bytes": allocated_after_train,
+        "vllm_sleep_pool_bytes": sleep_pool,
+        "peak_train_bytes_excl_vllm_pool": peak_train_excl_pool,
         # Which vLLM sampler produced the samples (transfer-rulings T17). Recorded
         # only; the analysis does not gate on it.
         "vllm_use_flashinfer_sampler": os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"),

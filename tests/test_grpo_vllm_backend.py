@@ -274,3 +274,57 @@ def test_manifest_completion_stats_show_whether_generation_stopped(tmp_path):
     assert s["mean_chars"] == pytest.approx(
         (len("<answer>1</answer>") + len("<answer>2</answer>\n<think>loop</think>") + 6 + 1) / 4
     )
+
+
+class _Alloc:
+    """Stands in for vLLM's CuMemAllocator: pointer_to_data maps a device pointer
+    to an allocation whose handle is (device, size_bytes, ...)."""
+
+    def __init__(self, sizes):
+        self.pointer_to_data = {
+            i: type("D", (), {"handle": (0, size, i, i)})() for i, size in enumerate(sizes)
+        }
+
+
+def test_sleep_pool_bytes_sums_every_allocation_in_the_pool():
+    from amenability.training.grpo import vllm_sleep_pool_bytes
+
+    assert vllm_sleep_pool_bytes(_Alloc([3_000, 9_000, 500])) == 12_500
+    assert vllm_sleep_pool_bytes(_Alloc([])) == 0
+
+
+def test_sleep_pool_bytes_is_none_without_a_vllm_allocator():
+    from amenability.training.grpo import vllm_sleep_pool_bytes
+
+    # No vLLM installed (CPU), or no colocated engine ever built its pool.
+    assert vllm_sleep_pool_bytes(None) is None
+
+
+def test_run_grpo_records_the_sleep_pool_before_shutting_the_engine_down(
+    tmp_path, monkeypatch
+):
+    # Sleep mode unmaps the pool's physical memory but its tensors stay allocated
+    # in torch's accounting, so max_memory_allocated counts the pool on top of the
+    # trainer's own peak (transfer-rulings T22). The pool is gone after shutdown,
+    # so it must be read before.
+    from amenability.training import grpo
+
+    log = []
+    monkeypatch.setattr(grpo, "_current_sleep_pool_bytes",
+                        lambda: log.append("measure") or 12_700_000_000)
+
+    class Trainer:
+        def __init__(self, **kw):
+            self.model = None
+            self.vllm_generation = type("G", (), {"llm": _LLM(log)})()
+
+        def train(self):
+            pass
+
+        def save_model(self, d):
+            Path(d).mkdir(parents=True, exist_ok=True)
+
+    run_grpo(_spec(tmp_path, ANSWER_STOP), trainer_factory=lambda **kw: Trainer(**kw))
+    assert log == ["measure", "shutdown"]
+    m = json.loads((tmp_path / "out" / "run_manifest.json").read_text())
+    assert m["vllm_sleep_pool_bytes"] == 12_700_000_000

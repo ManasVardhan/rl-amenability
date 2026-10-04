@@ -280,6 +280,7 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
     )
     saved_env = {key: os.environ.get(key) for key in VLLM_ENV_KEYS}
     trainer = None
+    sleep_pool_bytes = None
     try:
         trainer = trainer_factory(reward_funcs=[reward_fn], callbacks=[callback])
         model_obj = getattr(trainer, "model", None)
@@ -296,6 +297,8 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         # its weights, KV cache and distributed state alive (vLLM gc.freeze()s
         # them at startup), and the post-eval's engine would then fail its
         # free-memory check (issue #33, transfer-rulings T21).
+        # Read the sleep pool's size first: shutdown releases it (T22).
+        sleep_pool_bytes = _current_sleep_pool_bytes()
         _shutdown_colocated_vllm(trainer)
         _restore_env(saved_env)
 
@@ -327,6 +330,9 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         "vllm_enable_sleep_mode": VLLM_ENABLE_SLEEP_MODE,
         "vllm_max_model_length": VLLM_MAX_MODEL_LENGTH,
         "vllm_importance_sampling_correction": VLLM_IMPORTANCE_SAMPLING_CORRECTION,
+        # Bytes the colocated engine holds in vLLM's sleep-mode pool; torch counts
+        # them as allocated even while asleep (transfer-rulings T22).
+        "vllm_sleep_pool_bytes": sleep_pool_bytes,
         "completion_stats": stats.as_dict(),
         "expected_checkpoints": checkpoint_schedule(spec.max_steps, spec.save_steps),
         "n_step_records": len(callback.records),
@@ -348,6 +354,36 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
     del callback, model_obj, trainer
     _release_gpu()
     return records
+
+
+def vllm_sleep_pool_bytes(allocator) -> int | None:
+    """Total bytes allocated in vLLM's sleep-mode pool (CuMemAllocator), awake or not.
+
+    Why peak_train_bytes over-reports (transfer-rulings T22): with sleep mode on,
+    vLLM allocates its weights and KV cache through a torch MemPool backed by its
+    own cuMem allocator. Sleeping unmaps and releases the physical memory behind
+    those allocations but keeps the tensors, so torch's caching allocator still
+    counts every byte as allocated. torch.cuda.max_memory_allocated therefore
+    reports the trainer's peak PLUS the whole pool, whichever phase the peak
+    falls in, which is how Gemma-3-1B reported 45.6e9 on a 42.4e9-byte card.
+    Subtracting this figure gives the trainer-phase peak; the generation-phase
+    peak (trainer state plus the awake pool) is bounded by the raw figure.
+    None when there is no allocator (CPU, or no colocated engine was built).
+    """
+    if allocator is None:
+        return None
+    return int(sum(data.handle[1] for data in allocator.pointer_to_data.values()))
+
+
+def _current_sleep_pool_bytes() -> int | None:
+    try:
+        from vllm.device_allocator.cumem import CuMemAllocator
+    except Exception:
+        return None
+    try:
+        return vllm_sleep_pool_bytes(CuMemAllocator.instance)
+    except Exception:
+        return None
 
 
 def _shutdown_colocated_vllm(trainer) -> None:

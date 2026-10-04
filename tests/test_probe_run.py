@@ -178,7 +178,8 @@ def test_memory_fields_exist_and_are_none_without_cuda(tmp_path, fakes, monkeypa
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     _run(tmp_path, fakes)
     meta = json.loads(meta_path(tmp_path, "m", "countdown", 0).read_text())
-    for field in ("peak_memory_bytes", "peak_train_bytes", "allocated_after_train_bytes"):
+    for field in ("peak_memory_bytes", "peak_train_bytes", "allocated_after_train_bytes",
+                  "vllm_sleep_pool_bytes", "peak_train_bytes_excl_vllm_pool"):
         assert field in meta and meta[field] is None
 
 
@@ -211,6 +212,35 @@ def test_memory_fields_measure_training_from_a_reset_peak(tmp_path, fakes, monke
     assert meta["peak_train_bytes"] == 500
     assert meta["allocated_after_train_bytes"] == 120
     assert meta["peak_memory_bytes"] == 900   # still the overall figure across the whole job
+    # The fake manifest records no sleep pool, so there is nothing to subtract.
+    assert meta["vllm_sleep_pool_bytes"] is None
+    assert meta["peak_train_bytes_excl_vllm_pool"] is None
+
+
+def test_peak_train_is_also_reported_without_the_vllm_sleep_pool(tmp_path, fakes, monkeypatch):
+    """torch counts the colocated engine's sleep-mode pool as allocated even while
+    its physical memory is released (transfer-rulings T22), so the raw training
+    peak over-reports by the pool's size. The meta keeps the raw figure and adds
+    the peak with the pool taken out, read from the run manifest."""
+    import torch
+    state, fake_passk, fake_train = fakes
+
+    def train(spec, **kw):
+        out = fake_train(spec, **kw)
+        (Path(spec.output_dir) / "run_manifest.json").write_text(
+            json.dumps({"vllm_sleep_pool_bytes": 12_000})
+        )
+        return out
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 45_000)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 2_000)
+    _run(tmp_path, fakes, train_fn=train)
+    meta = json.loads(meta_path(tmp_path, "m", "countdown", 0).read_text())
+    assert meta["peak_train_bytes"] == 45_000
+    assert meta["vllm_sleep_pool_bytes"] == 12_000
+    assert meta["peak_train_bytes_excl_vllm_pool"] == 33_000
 
 
 def test_write_json_failure_leaves_no_partial_file_at_the_target(tmp_path, monkeypatch):
