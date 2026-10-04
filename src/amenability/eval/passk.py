@@ -19,6 +19,11 @@ def pass_at_k(n: int, c: int, k: int) -> float:
     return float(1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1)))
 
 
+# Token budget of every pass@k completion. GRPO rollouts are pinned to the same
+# budget (transfer-rulings T22, grpo.MAX_COMPLETION_LENGTH).
+PASSK_MAX_TOKENS = 768
+
+
 @dataclass(frozen=True)
 class PassKResult:
     ks: dict[int, float]
@@ -35,7 +40,7 @@ def sampling_kwargs(n: int, temperature: float, seed: int, stop: str | None) -> 
     "</answer>" would never appear, the <answer>(.*?)</answer> regex would never
     match, and every completion would score 0.
     """
-    kw = {"n": n, "temperature": temperature, "top_p": 0.95, "max_tokens": 768, "seed": seed}
+    kw = {"n": n, "temperature": temperature, "top_p": 0.95, "max_tokens": PASSK_MAX_TOKENS, "seed": seed}
     if stop:
         kw["stop"] = [stop]
         kw["include_stop_str_in_output"] = True

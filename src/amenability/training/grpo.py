@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from amenability.eval.passk import shutdown_vllm_engine
+from amenability.eval.passk import PASSK_MAX_TOKENS, shutdown_vllm_engine
 from amenability.probe.callbacks import GroupedRewardRecorder, TelemetryCallback
 from amenability.probe.entropy import EntropyProbe
 from amenability.probe.telemetry import StepRecord
@@ -44,10 +44,14 @@ GENERATION_BACKEND = "vllm_colocate"
 # step's peak stays the trainer's own forward/backward peak.
 VLLM_GPU_MEMORY_UTILIZATION = 0.3
 VLLM_ENABLE_SLEEP_MODE = True
+# Rollout token cap (transfer-rulings T22). Pinned to the pass@k budget instead of
+# TRL's default of 512: at 512, 70% of Qwen2.5-0.5B's smoke rollouts were cut off
+# before </answer> and scored 0, though the same model had 768 tokens at pre-eval.
+MAX_COMPLETION_LENGTH = PASSK_MAX_TOKENS
 # vLLM otherwise sizes its context from the model config (131072 tokens for
 # Llama-3.2-1B and Qwen2.5-1.5B) and refuses to start unless one sequence of that
 # length fits in the KV cache. Prompts are at most about 250 tokens, so 2048 holds
-# prompt plus the 512-token completion cap with room; check_fits_vllm_context
+# prompt plus the 768-token completion cap with room; check_fits_vllm_context
 # refuses any item set for which a completion could be cut short by the context.
 VLLM_MAX_MODEL_LENGTH = 2048
 # TRL defaults this to True whenever use_vllm is set: it reweights each sequence's
@@ -127,6 +131,7 @@ def build_grpo_config_kwargs(spec: GRPOSpec) -> dict:
         beta=spec.beta,
         temperature=spec.temperature,
         num_generations=spec.num_generations,
+        max_completion_length=MAX_COMPLETION_LENGTH,
         # See PROMPTS_PER_STEP above: pins the batch shape so the protocol is
         # identical across models and machines.
         per_device_train_batch_size=spec.num_generations,
@@ -302,6 +307,7 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         "max_steps": spec.max_steps,
         "save_steps": spec.save_steps,
         "num_generations": spec.num_generations,
+        "max_completion_length": MAX_COMPLETION_LENGTH,
         "prompts_per_step": PROMPTS_PER_STEP,
         "per_device_train_batch_size": spec.num_generations,
         "gradient_accumulation_steps": PROMPTS_PER_STEP,

@@ -7,10 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from amenability.eval.passk import shutdown_vllm_engine
+from amenability.eval.passk import PASSK_MAX_TOKENS, sampling_kwargs, shutdown_vllm_engine
 from amenability.suites.base import ANSWER_STOP, TaskItem
 from amenability.training.grpo import (
     GENERATION_BACKEND,
+    MAX_COMPLETION_LENGTH,
     PROMPTS_PER_STEP,
     VLLM_ENV_KEYS,
     VLLM_GPU_MEMORY_UTILIZATION,
@@ -84,7 +85,8 @@ def test_backend_switch_leaves_every_protocol_quantity_unchanged(tmp_path):
     from trl import GRPOConfig
 
     cfg = GRPOConfig(**build_grpo_config_kwargs(_spec(tmp_path, ANSWER_STOP)))
-    assert cfg.max_completion_length == 512
+    # Pinned (transfer-rulings T22), no longer TRL's default of 512.
+    assert cfg.max_completion_length == 768
     assert cfg.learning_rate == 1e-6
     assert cfg.beta == 0.04
     assert cfg.temperature == 1.0
@@ -105,14 +107,37 @@ def test_backend_switch_leaves_every_protocol_quantity_unchanged(tmp_path):
     assert cfg.generation_kwargs == {"stop": ["</answer>"], "include_stop_str_in_output": True}
 
 
+def test_completion_cap_is_pinned_to_the_passk_budget(tmp_path):
+    # Transfer-rulings T22: GRPO rollouts get the same token budget as the pre- and
+    # post-eval. At TRL's default of 512, 70% of Qwen2.5-0.5B's smoke rollouts were
+    # cut before </answer> and scored 0, though the same model had 768 at pre-eval.
+    kw = build_grpo_config_kwargs(_spec(tmp_path, ANSWER_STOP))
+    assert kw["max_completion_length"] == MAX_COMPLETION_LENGTH == 768
+    assert MAX_COMPLETION_LENGTH == PASSK_MAX_TOKENS
+    assert sampling_kwargs(8, 1.0, 0, ANSWER_STOP)["max_tokens"] == MAX_COMPLETION_LENGTH
+
+
 def test_context_check_accepts_the_probe_budget():
-    check_fits_vllm_context(max_prompt_tokens=250, max_completion_length=512)
+    check_fits_vllm_context(max_prompt_tokens=250, max_completion_length=MAX_COMPLETION_LENGTH)
+
+
+def test_context_holds_the_longest_probe_prompt_plus_the_cap():
+    # Prompts are counted in characters here, an upper bound on tokens for these
+    # ASCII prompts, so the check holds for every tokenizer.
+    from amenability.suites.catalog import PROBE_SUITES
+
+    longest = max(
+        len(it.prompt) for s in PROBE_SUITES.values() for it in s.generate(300, 0)
+    )
+    check_fits_vllm_context(max_prompt_tokens=longest, max_completion_length=MAX_COMPLETION_LENGTH)
 
 
 def test_context_check_rejects_a_prompt_that_would_shorten_completions():
     with pytest.raises(ValueError, match="vllm_max_model_length"):
-        check_fits_vllm_context(max_prompt_tokens=VLLM_MAX_MODEL_LENGTH - 511,
-                                max_completion_length=512)
+        check_fits_vllm_context(
+            max_prompt_tokens=VLLM_MAX_MODEL_LENGTH - MAX_COMPLETION_LENGTH + 1,
+            max_completion_length=MAX_COMPLETION_LENGTH,
+        )
 
 
 class _Core:
