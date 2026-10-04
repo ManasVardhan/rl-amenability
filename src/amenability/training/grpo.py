@@ -48,6 +48,14 @@ VLLM_ENABLE_SLEEP_MODE = True
 # TRL's default of 512: at 512, 70% of Qwen2.5-0.5B's smoke rollouts were cut off
 # before </answer> and scored 0, though the same model had 768 tokens at pre-eval.
 MAX_COMPLETION_LENGTH = PASSK_MAX_TOKENS
+# Rollout sampling filters, pinned to TRL's defaults so the GRPO config and the
+# difficulty calibration (which must sample exactly as rollouts do, T22) read the
+# same values: no top-p, top-k or min-p filter and no repetition penalty, the
+# distribution GRPO has sampled from since Stage 0.
+ROLLOUT_TOP_P = 1.0
+ROLLOUT_TOP_K = 0
+ROLLOUT_MIN_P = 0.0
+ROLLOUT_REPETITION_PENALTY = 1.0
 # vLLM otherwise sizes its context from the model config (131072 tokens for
 # Llama-3.2-1B and Qwen2.5-1.5B) and refuses to start unless one sequence of that
 # length fits in the KV cache. Prompts are at most about 250 tokens, so 2048 holds
@@ -132,6 +140,10 @@ def build_grpo_config_kwargs(spec: GRPOSpec) -> dict:
         temperature=spec.temperature,
         num_generations=spec.num_generations,
         max_completion_length=MAX_COMPLETION_LENGTH,
+        top_p=ROLLOUT_TOP_P,
+        top_k=ROLLOUT_TOP_K,
+        min_p=None if ROLLOUT_MIN_P == 0.0 else ROLLOUT_MIN_P,
+        repetition_penalty=ROLLOUT_REPETITION_PENALTY,
         # See PROMPTS_PER_STEP above: pins the batch shape so the protocol is
         # identical across models and machines.
         per_device_train_batch_size=spec.num_generations,

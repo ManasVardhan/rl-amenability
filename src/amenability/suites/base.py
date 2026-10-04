@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -8,6 +9,17 @@ from dataclasses import dataclass
 # samples completions for a tagged suite stops at (or truncates to) the first
 # occurrence of this string, keeping the string itself so the answer regex matches.
 ANSWER_STOP = "</answer>"
+
+
+_ANSWER_BLOCK_RE = re.compile(r"<answer>(.*?)</answer>", flags=re.DOTALL)
+
+
+def first_answer_block(completion: str) -> str | None:
+    """Contents of the FIRST <answer>...</answer> block, unstripped, or None if the
+    completion has no closed answer block. The first answer counts (T20): a base
+    model loops think/answer blocks after its first answer."""
+    m = _ANSWER_BLOCK_RE.search(completion)
+    return m.group(1) if m else None
 
 
 def truncate_at_stop(text: str, stop: str | None) -> str:

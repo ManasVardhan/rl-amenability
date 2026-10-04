@@ -24,7 +24,7 @@ import random
 import re
 from collections import deque
 
-from amenability.suites.base import TaskItem
+from amenability.suites.base import TaskItem, first_answer_block
 from amenability.suites.countdown import SCAFFOLD_HEAD, SCAFFOLD_TAIL
 
 SUITE_NAME = "probe_graphpath"
@@ -160,10 +160,10 @@ def generate_graphpath(
 
 def extract_path(completion: str) -> list[str] | None:
     # The FIRST answer counts (transfer-rulings T20), as in Countdown.
-    m = re.search(r"<answer>(.*?)</answer>", completion, flags=re.DOTALL)
-    if m is None:
+    block = first_answer_block(completion)
+    if block is None:
         return None
-    raw = m.group(1).strip()
+    raw = block.strip()
     if not raw:
         return None
     nodes = [p.strip() for p in raw.split("->")]

@@ -7,7 +7,7 @@ import random
 import re
 from fractions import Fraction
 
-from amenability.suites.base import TaskItem
+from amenability.suites.base import TaskItem, first_answer_block
 
 # TinyZero base-model completion scaffold (transfer-rulings T19). The probe roster is
 # base models, which read a bare instruction as the start of a web document and do
@@ -132,8 +132,12 @@ def generate_countdown(
 def extract_expression(completion: str) -> str | None:
     # The FIRST answer counts (transfer-rulings T20): a base model loops think/answer
     # blocks after its first answer, and the loop is not its answer.
-    m = re.search(r"<answer>(.*?)</answer>", completion, flags=re.DOTALL)
-    return m.group(1).strip() if m else None
+    block = first_answer_block(completion)
+    return block.strip() if block is not None else None
+
+
+class _DivisionByZero(ValueError):
+    """A well-formed expression that divides by zero: wrong, but not malformed."""
 
 
 def _eval_node(node: ast.AST, used: list[int]) -> Fraction:
@@ -147,7 +151,7 @@ def _eval_node(node: ast.AST, used: list[int]) -> Fraction:
     if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
         left, right = _eval_node(node.left, used), _eval_node(node.right, used)
         if isinstance(node.op, ast.Div) and right == 0:
-            raise ValueError("division by zero")
+            raise _DivisionByZero("division by zero")
         return _OPS[type(node.op)](left, right)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
         return -_eval_node(node.operand, used)
@@ -168,6 +172,30 @@ def _strip_trailing_target(expr: str, target: int) -> str | None:
     return m.group("expr")
 
 
+def parse_expression(expr: str) -> tuple[Fraction | None, list[int]] | None:
+    """(value, integer literals used) of an expression in the task's grammar
+    (integer literals, + - * /, unary minus, parentheses), or None if it is not
+    one. value is None for a well-formed expression that divides by zero."""
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    used: list[int] = []
+    try:
+        return _eval_node(tree, used), used
+    except _DivisionByZero:
+        return None, used
+    except (ValueError, ZeroDivisionError, RecursionError):
+        return None
+
+
+def strip_any_trailing_equals(expr: str) -> str | None:
+    """The left-hand side of "<expr> = <integer>", whatever the integer, or None.
+    For the failure taxonomy only: the verifier accepts only the true target."""
+    m = _TRAILING_EQUALS_RE.match(expr)
+    return m.group("expr") if m else None
+
+
 def verify_countdown(item: TaskItem, completion: str) -> bool:
     expr = extract_expression(completion)
     if expr is None:
@@ -177,12 +205,10 @@ def verify_countdown(item: TaskItem, completion: str) -> bool:
     if expr is None:
         return False
     available = sorted(int(x) for x in numbers_s.split(","))
-    try:
-        tree = ast.parse(expr, mode="eval")
-        used: list[int] = []
-        value = _eval_node(tree, used)
-    except (SyntaxError, ValueError, ZeroDivisionError, RecursionError):
+    parsed = parse_expression(expr)
+    if parsed is None or parsed[0] is None:
         return False
+    value, used = parsed
     if sorted(used) != available:
         return False
     return value == Fraction(int(target_s))
