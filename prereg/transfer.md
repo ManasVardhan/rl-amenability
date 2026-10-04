@@ -36,6 +36,21 @@ and edited into the sections below:
   "= <target>" in the answer. Pilot results produced with the old prompts are
   deleted and rerun; none is used.
 
+## Second amendment of 2026-10-03
+
+Made on 2026-10-03, before any batch data existed, from a GPU check of the T19
+scaffold. No probe (training) job had run. One change, recorded as ruling T20
+in `docs/decisions/transfer-rulings.md` and edited into the sections below:
+
+- Falcon3-1B-Base under the scaffold answers, then loops think/answer blocks
+  until the token cap, and the verifiers scored the last answer, i.e. the loop.
+  Probe completions now end at the first `</answer>` (a vLLM stop string kept in
+  the output for pass@k; truncation before scoring for GRPO rewards and SFT
+  targets), and both verifiers score the first answer block. GRPO generation
+  still runs to its token cap; only its reward is truncated. gsm8k is
+  unaffected. Pre-eval results scored before this change are deleted and
+  rerun; none is used.
+
 ## Question
 
 Q1, probe invariance: does a model's probe score depend on which probe suite
@@ -66,6 +81,10 @@ replicate on Countdown. No ground truth is involved.
   defined by `PROMPT` in `src/amenability/suites/countdown.py` and
   `src/amenability/suites/graphpath.py`. Every reward and pass@k is computed on
   the completion alone, never on prompt plus completion.
+- Completion stop (amended, T20): every probe completion is scored up to and
+  including its first `</answer>`, and the verifiers read the first
+  `<answer>...</answer>` block. pass@k stops generation there; GRPO truncates
+  only for the reward.
 - Items: generated from item seed 0 for every arm. Run seed 0 for the two suite
   arms, run seed 1 for the Countdown replicate.
 - Statistics: `spearman_with_ci` (percentile bootstrap, permutation p, 10,000

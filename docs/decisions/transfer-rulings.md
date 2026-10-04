@@ -316,3 +316,73 @@ next "User:" turn and a second answer tag, and the verifier takes the last tag;
 if pilot completions show this, the remedy is a stop string or truncation at the
 next turn, recorded in a further ruling. The trailing-"=" tolerance makes
 Countdown slightly more lenient than TinyZero's reward, uniformly across models.
+
+**T20. Probe completions end at the first `</answer>`, and the verifiers score the
+first answer.**
+Written from a real GPU check of the T19 scaffold, before any batch data.
+Falcon3-1B-Base (temperature 1.0, top_p 0.95, max_tokens 768) now engages and
+emits the tags, but it does not stop after its first `</answer>`. It loops
+think/answer blocks until the token cap:
+"</think>\n<answer>\nThe equation 4 + 20 = 25\n</answer>\n<think>\n4 + 20 = 24
+...</think>\n<answer>\n20 + 9 = 29...</think>\n<answer>\n20 - 4 = 16, so 16 more
+is needed...</think>\n<answer>\n20 - 4 = 16 ..." and so on to max_tokens. Both
+verifiers took the LAST `<answer>` match, so they scored the degenerate loop
+text rather than the model's first answer, and every sample spent its full
+768-token budget (300 items x 64 samples per pre-eval job, plus GRPO's
+completions). This is the failure T19's cost-if-wrong anticipated.
+The change has two parts.
+(1) Stop at the first `</answer>`, per suite. `ProbeSuite.stop` is
+`ANSWER_STOP = "</answer>"` for both probe suites, and `run_probe` passes it to
+pass@k and to GRPO. pass@k: `_vllm_generate` builds `SamplingParams` from
+`sampling_kwargs`, which adds `stop=["</answer>"]` and
+`include_stop_str_in_output=True`; `evaluate_passk` also truncates every
+completion just after the first stop string before verifying, so the contract
+holds for any generator. GRPO: the reward function scores each completion
+truncated just after its first `</answer>`. SFT: `build_rejection_dataset` takes
+`stop` and cuts every candidate there before verifying, deduplicating and
+storing it as a target, so SFT never teaches the loop (no runner calls it yet;
+a caller for a probe suite must pass the suite's stop). gsm8k is not a probe
+suite and has no tags: every stop parameter defaults to None, `RealRunner`'s
+gsm8k pass@k and GRPO calls pass none, and their generation and scoring are
+byte-for-byte unchanged.
+(2) Both extractors (`extract_expression`, `extract_path`) take the FIRST
+`<answer>...</answer>` match instead of the last.
+Both parts, not one. The stop alone leaves every path where it is not applied
+(GRPO, below; any future caller that forgets the stop) scoring the loop. The
+first-match rule alone makes scoring correct but keeps paying for the loop on
+every sample, and lets the loop's tokens dominate SFT targets. With both, a
+completion is judged on its first answer whichever path produced it.
+The vLLM pitfall: vLLM strips stop strings from the returned text by default.
+With `stop` but without `include_stop_str_in_output=True`, no completion would
+contain `</answer>`, the `<answer>(.*?)</answer>` regex would never match, and
+every probe score would be exactly 0. `test_sampling_kwargs_keep_the_stop_string_in_the_output`
+holds the flag; the post-hoc truncation in `evaluate_passk` cannot repair a
+stripped tag, so the flag is load-bearing.
+GRPO does not stop generation. The installed TRL is 1.13.0 (uv.lock), and
+`run_grpo` uses TRL's transformers generate path (`use_vllm` defaults to
+False). `GRPOConfig.generation_kwargs` is forwarded to transformers'
+`GenerationConfig`, which accepts `stop_strings`, but TRL 1.13 calls
+`model.generate` without `tokenizer=`, and transformers raises in its
+`StopStringCriteria` setup when stop strings are set without a tokenizer. So
+the stop cannot be expressed cleanly, and the reward function truncates
+instead: GRPO generation still runs to `max_completion_length` (TRL default
+512, `GRPOConfig.max_completion_length`, not pinned here; pinning it is an open
+owner decision), the loop tokens stay in the completion mask and share the
+group's advantage, and only the reward ignores them. The run manifest records
+`completion_stop` and `generation_runs_to_cap: true`. Switching GRPO to TRL's
+vLLM generation (`use_vllm=True` with `generation_kwargs={"stop": ["</answer>"],
+"include_stop_str_in_output": True}`) would stop it, but it changes the training
+backend and its memory profile and needs a GPU check, so it is not done here.
+The T19 tolerance of one trailing "= <target>" is unchanged. An answer with
+prose, such as "The equation 4 + 20 = 25", still scores 0, as intended. Any
+pre-eval or telemetry file produced before this ruling was scored on the last
+answer and must be deleted (or rerun with `--force`), because `run_probe`
+reuses cached outputs. `prereg/transfer.md` is amended.
+*Cost if wrong:* a model that writes a provisional answer, then corrects itself
+in a later answer block, is scored on the provisional one; that is the price of
+not scoring the loop, and it applies uniformly across models. In GRPO the
+reward stays correct but the policy gradient still pushes on loop tokens, so
+the loop may be reinforced or suppressed in proportion to the first answer's
+reward; the probe measures that dynamic as it is. If the 512-token GRPO cap
+truncates first answers often, the remedy is the vLLM path above or pinning
+`max_completion_length`, recorded in a further ruling.
