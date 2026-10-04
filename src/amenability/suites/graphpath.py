@@ -78,15 +78,22 @@ def shortest_distance(edges: set[frozenset[str]], source: str, target: str) -> i
     return None
 
 
-def _random_connected_graph(n: int, rng: random.Random) -> set[frozenset[str]]:
-    """A random spanning tree (so the graph is connected) plus n // 3 extra edges."""
+def _n_extra_edges(n: int, divisor: int | None) -> int:
+    return 0 if divisor is None else n // divisor
+
+
+def _random_connected_graph(
+    n: int, rng: random.Random, extra_edges_divisor: int | None = EXTRA_EDGES_DIVISOR
+) -> set[frozenset[str]]:
+    """A random spanning tree (so the graph is connected) plus n // divisor extra
+    edges (none when the divisor is None)."""
     labels = _labels(n)
     order = labels[:]
     rng.shuffle(order)
     edges: set[frozenset[str]] = set()
     for i in range(1, n):
         edges.add(frozenset((order[i], order[rng.randrange(i)])))
-    while len(edges) < n - 1 + n // EXTRA_EDGES_DIVISOR:
+    while len(edges) < n - 1 + _n_extra_edges(n, extra_edges_divisor):
         edges.add(frozenset(rng.sample(labels, 2)))
     return edges
 
@@ -95,28 +102,50 @@ def _edge_string(edges: set[frozenset[str]]) -> str:
     return ",".join(sorted("-".join(sorted(e)) for e in edges))
 
 
-def generate_graphpath(n: int, seed: int, buckets: tuple[int, ...] = (8, 10, 12)) -> list[TaskItem]:
+def generate_graphpath(
+    n: int,
+    seed: int,
+    buckets: tuple[int, ...] = (8, 10, 12),
+    min_distance: int = MIN_DISTANCE,
+    extra_edges_divisor: int | None = EXTRA_EDGES_DIVISOR,
+    id_namespace: str | None = None,
+) -> list[TaskItem]:
+    """n items split equally over the buckets (node count per graph).
+
+    Difficulty knobs (transfer-rulings T22): source and target are at least
+    min_distance edges apart, and each graph is a random spanning tree plus
+    n // extra_edges_divisor extra edges (a tree when the divisor is None). The
+    defaults are the pilot's items, byte for byte. id_namespace inserts a path
+    segment into every task_id, so items generated under another difficulty
+    candidate never share an ID with these.
+    """
     if max(buckets) > _MAX_NODES:
         raise ValueError(
             f"bucket of {max(buckets)} nodes would use labels that collide with the "
             f"prompt's example path X -> Y -> Z; at most {_MAX_NODES} nodes"
         )
+    if min_distance > min(buckets) - 1:
+        raise ValueError(
+            f"min_distance {min_distance} is unreachable in a {min(buckets)}-node graph "
+            f"(at most {min(buckets) - 1})"
+        )
+    prefix = "probe/graphpath/" + (f"{id_namespace}/" if id_namespace else "")
     rng = random.Random(seed)
     items: list[TaskItem] = []
     per_bucket = n // len(buckets)
     for bucket in buckets:
         made = 0
         while made < per_bucket:
-            edges = _random_connected_graph(bucket, rng)
+            edges = _random_connected_graph(bucket, rng, extra_edges_divisor)
             source, target = rng.sample(_labels(bucket), 2)
             d = shortest_distance(edges, source, target)
-            if d is None or d < MIN_DISTANCE:
+            if d is None or d < min_distance:
                 continue
             edge_s = _edge_string(edges)
             idx = len(items)
             items.append(
                 TaskItem(
-                    task_id=f"probe/graphpath/{seed}/{idx}",
+                    task_id=f"{prefix}{seed}/{idx}",
                     suite=SUITE_NAME,
                     prompt=PROMPT.format(
                         edges=", ".join(edge_s.split(",")), source=source, target=target

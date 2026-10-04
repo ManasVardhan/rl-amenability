@@ -84,21 +84,41 @@ def _constructive_target(numbers: list[int], rng: random.Random) -> int | None:
     return int(acc)
 
 
-def generate_countdown(n: int, seed: int, buckets: tuple[int, ...] = (3, 4, 5)) -> list[TaskItem]:
+def generate_countdown(
+    n: int,
+    seed: int,
+    buckets: tuple[int, ...] = (3, 4, 5),
+    number_range: tuple[int, int] = (1, 20),
+    target_range: tuple[int, int] = (10, 400),
+    id_namespace: str | None = None,
+) -> list[TaskItem]:
+    """n items split equally over the buckets (count of numbers per item).
+
+    Difficulty knobs (transfer-rulings T22): each number is drawn uniformly from
+    number_range, inclusive, and a constructive target is kept only if it lies in
+    target_range, inclusive. The defaults are the pilot's items, byte for byte.
+    id_namespace inserts a path segment into every task_id, so items generated
+    under another difficulty candidate never share an ID with these.
+    """
+    lo, hi = number_range
+    t_lo, t_hi = target_range
+    if lo > hi or t_lo > t_hi:
+        raise ValueError(f"empty range: number_range={number_range}, target_range={target_range}")
+    prefix = "probe/countdown/" + (f"{id_namespace}/" if id_namespace else "")
     rng = random.Random(seed)
     items: list[TaskItem] = []
     per_bucket = n // len(buckets)
     for bucket in buckets:
         made = 0
         while made < per_bucket:
-            numbers = [rng.randint(1, 20) for _ in range(bucket)]
+            numbers = [rng.randint(lo, hi) for _ in range(bucket)]
             target = _constructive_target(numbers, rng)
-            if target is None or not (10 <= target <= 400):
+            if target is None or not (t_lo <= target <= t_hi):
                 continue
             idx = len(items)
             items.append(
                 TaskItem(
-                    task_id=f"probe/countdown/{seed}/{idx}",
+                    task_id=f"{prefix}{seed}/{idx}",
                     suite="probe_countdown",
                     prompt=PROMPT.format(numbers=", ".join(map(str, numbers)), target=target),
                     answer=f"{','.join(map(str, numbers))}|{target}",
