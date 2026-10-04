@@ -120,7 +120,10 @@ def test_countdown_tolerates_a_trailing_equals_target_only():
 def test_graph_prompt_example_uses_nodes_no_item_can_contain():
     all_labels = set(_labels(12))
     it = _graph_items()[0]
-    example = extract_path(it.prompt)
+    # The example is the prompt's last answer block; the first is the empty
+    # "<answer> </answer> tags" format mention, which extract_path rejects.
+    assert extract_path(it.prompt) is None
+    example = extract_path(it.prompt[it.prompt.index("for example"):])
     assert example is not None and len(example) >= 2
     assert not set(example) & all_labels
 
@@ -184,3 +187,48 @@ def test_graph_generator_refuses_buckets_that_could_contain_the_example_nodes():
     generate_graphpath(n=3, seed=0, buckets=(23,))  # labels A..W, still disjoint
     with pytest.raises(ValueError, match="example"):
         generate_graphpath(n=3, seed=0, buckets=(24,))
+
+
+# Transfer-rulings T20: a base model under the scaffold does not stop after its first
+# </answer>; it loops think/answer blocks until max_tokens. Both extractors score the
+# FIRST answer, so the loop text after it can neither rescue nor sink a completion.
+LOOP_TAIL = (
+    "\n<think>\n4 + 20 = 24 ...</think>\n<answer>\n20 + 9 = 29...</answer>\n<think>\n"
+    "20 - 4 = 16, so 16 more is needed...</think>\n<answer>\n20 - 4 = 16 ...</answer>\n<think>\n"
+)
+
+
+def test_countdown_extractor_takes_the_first_answer():
+    from amenability.suites.countdown import extract_expression
+    assert extract_expression("<answer>1 + 2</answer> junk <answer>3 * 4</answer>") == "1 + 2"
+
+
+def test_graph_extractor_takes_the_first_answer():
+    assert extract_path("<answer>A -> B</answer> junk <answer>C -> D</answer>") == ["A", "B"]
+
+
+def test_countdown_looping_completion_is_scored_on_its_first_answer():
+    it = _countdown_items()[0]
+    numbers, target = _numbers_target(it)
+    right = solve_countdown(numbers, target)
+    wrong = "+".join(map(str, numbers)) if sum(numbers) != target else "*".join(map(str, numbers))
+    assert verify_countdown(it, f"<answer>{wrong}</answer>") is False  # precondition
+    # The observed shape: prose answer first, then the loop. Prose stays a failure.
+    observed = f"Thinking.\n</think>\n<answer>\nThe equation {wrong} = {target}\n</answer>" + LOOP_TAIL
+    assert verify_countdown(it, observed) is False
+    first_right = f"t\n</think>\n<answer>{right}</answer>" + LOOP_TAIL + f"<answer>{wrong}</answer>"
+    assert verify_countdown(it, first_right) is True
+    first_wrong = f"t\n</think>\n<answer>{wrong}</answer>" + LOOP_TAIL + f"<answer>{right}</answer>"
+    assert verify_countdown(it, first_wrong) is False
+
+
+def test_graph_looping_completion_is_scored_on_its_first_answer():
+    it = _graph_items()[0]
+    right = " -> ".join(_bfs_path(it))
+    _, source, target = it.answer.split("|")
+    wrong = f"{source} -> {target}"  # distance >= 3, so never an edge
+    assert verify_graphpath(it, f"<answer>{wrong}</answer>") is False  # precondition
+    first_right = f"t\n</think>\n<answer>{right}</answer>" + LOOP_TAIL + f"<answer>{wrong}</answer>"
+    assert verify_graphpath(it, first_right) is True
+    first_wrong = f"t\n</think>\n<answer>{wrong}</answer>" + LOOP_TAIL + f"<answer>{right}</answer>"
+    assert verify_graphpath(it, first_wrong) is False

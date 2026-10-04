@@ -34,8 +34,9 @@ def test_task_ids_are_namespaced_to_probe():
     assert all(it.task_id.startswith("probe/countdown/") for it in items)
 
 
-def test_extract_expression_takes_last_answer_tag():
-    assert extract_expression("junk <answer>1+1</answer> more <answer>2*3</answer>") == "2*3"
+def test_extract_expression_takes_first_answer_tag():
+    # First, not last (transfer-rulings T20): later tags are the base model's loop.
+    assert extract_expression("junk <answer>1+1</answer> more <answer>2*3</answer>") == "1+1"
     assert extract_expression("no tags here") is None
 
 

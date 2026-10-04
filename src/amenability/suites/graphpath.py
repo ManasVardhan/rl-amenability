@@ -130,10 +130,11 @@ def generate_graphpath(n: int, seed: int, buckets: tuple[int, ...] = (8, 10, 12)
 
 
 def extract_path(completion: str) -> list[str] | None:
-    matches = re.findall(r"<answer>(.*?)</answer>", completion, flags=re.DOTALL)
-    if not matches:
+    # The FIRST answer counts (transfer-rulings T20), as in Countdown.
+    m = re.search(r"<answer>(.*?)</answer>", completion, flags=re.DOTALL)
+    if m is None:
         return None
-    raw = matches[-1].strip()
+    raw = m.group(1).strip()
     if not raw:
         return None
     nodes = [p.strip() for p in raw.split("->")]

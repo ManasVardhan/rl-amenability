@@ -110,8 +110,10 @@ def generate_countdown(n: int, seed: int, buckets: tuple[int, ...] = (3, 4, 5)) 
 
 
 def extract_expression(completion: str) -> str | None:
-    matches = re.findall(r"<answer>(.*?)</answer>", completion, flags=re.DOTALL)
-    return matches[-1].strip() if matches else None
+    # The FIRST answer counts (transfer-rulings T20): a base model loops think/answer
+    # blocks after its first answer, and the loop is not its answer.
+    m = re.search(r"<answer>(.*?)</answer>", completion, flags=re.DOTALL)
+    return m.group(1).strip() if m else None
 
 
 def _eval_node(node: ast.AST, used: list[int]) -> Fraction:

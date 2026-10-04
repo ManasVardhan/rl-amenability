@@ -96,12 +96,13 @@ def test_verifier_rejects_wrong_endpoints_non_edges_and_repeats():
     assert not verify_graphpath(it, _answer([source, other, other, target]))
 
 
-def test_verifier_takes_the_last_answer_block_and_tolerates_whitespace():
+def test_verifier_takes_the_first_answer_block_and_tolerates_whitespace():
+    # First, not last (transfer-rulings T20): later blocks are the base model's loop.
     it = generate_graphpath(n=3, seed=4)[0]
     path = _bfs_path(it)
     spaced = "<answer> " + " -> ".join(path) + " </answer>"
-    assert verify_graphpath(it, "<answer>A->B</answer> no wait " + spaced)
-    assert not verify_graphpath(it, spaced + " actually <answer>A->B</answer>")
+    assert verify_graphpath(it, spaced + " actually <answer>A->B</answer>")
+    assert not verify_graphpath(it, "<answer>A->B</answer> no wait " + spaced)
 
 
 def test_verifier_rejects_unparseable_and_lowercase():
