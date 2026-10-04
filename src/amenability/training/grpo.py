@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from amenability.eval.passk import shutdown_vllm_engine
 from amenability.probe.callbacks import GroupedRewardRecorder, TelemetryCallback
 from amenability.probe.entropy import EntropyProbe
 from amenability.probe.telemetry import StepRecord
@@ -23,6 +25,51 @@ ENTROPY_BATCH_SIZE = 16
 # recorded in the pre-registration, not a silent choice.
 PROMPTS_PER_STEP = 4
 
+# Rollout generation (transfer-rulings T21). TRL generates GRPO completions with a
+# vLLM engine colocated in the training process on the job's one GPU, so the
+# suite's stop string ends generation instead of only truncating the reward. These
+# are engine settings, not protocol quantities: the sampling distribution, the
+# loss and the batch shape are as on the transformers path.
+GENERATION_BACKEND = "vllm_colocate"
+# vLLM's own budget, as a fraction of total device memory, while it generates. With
+# sleep mode on it holds this only during generation: at level 2 it discards its
+# weights and KV cache before the trainer's forward and backward passes, and TRL
+# re-pushes the current weights on wake-up. So the trainer's activation peak and
+# vLLM's budget are never resident together. On a 40 GB A100 (42.4e9 bytes) 0.3 is
+# 12.7e9 bytes: a 1.7B model's bf16 weights (3.4e9), vLLM's profiling and CUDA
+# graph overhead (about 1.5e9) and a KV cache of about 7.8e9 bytes, which holds all
+# 32 rollouts of a step at once even for SmolLM2-1.7B's 196 KB per token. During
+# generation the trainer keeps only its weights, the reference model and Adam
+# state (about 13.6e9 bytes at 1.7B in bf16), so generation peaks near 26e9. The
+# step's peak stays the trainer's own forward/backward peak.
+VLLM_GPU_MEMORY_UTILIZATION = 0.3
+VLLM_ENABLE_SLEEP_MODE = True
+# vLLM otherwise sizes its context from the model config (131072 tokens for
+# Llama-3.2-1B and Qwen2.5-1.5B) and refuses to start unless one sequence of that
+# length fits in the KV cache. Prompts are at most about 250 tokens, so 2048 holds
+# prompt plus the 512-token completion cap with room; check_fits_vllm_context
+# refuses any item set for which a completion could be cut short by the context.
+VLLM_MAX_MODEL_LENGTH = 2048
+# TRL defaults this to True whenever use_vllm is set: it reweights each sequence's
+# loss by the trainer-vs-vLLM likelihood ratio and masks sequences whose ratio
+# exceeds 3. The transformers path has no such term, so it is off: the loss is
+# unchanged and only the sampler moved.
+VLLM_IMPORTANCE_SAMPLING_CORRECTION = False
+
+# Environment variables that TRL's colocate init (RANK, LOCAL_RANK, WORLD_SIZE,
+# MASTER_ADDR, MASTER_PORT) and vLLM's external_launcher backend
+# (VLLM_ENABLE_V1_MULTIPROCESSING=0) write process-wide. run_grpo restores them,
+# so a later pass@k engine in the same process runs as a subprocess, exactly as the
+# pre-eval did.
+VLLM_ENV_KEYS = (
+    "VLLM_ENABLE_V1_MULTIPROCESSING",
+    "RANK",
+    "LOCAL_RANK",
+    "WORLD_SIZE",
+    "MASTER_ADDR",
+    "MASTER_PORT",
+)
+
 
 @dataclass(frozen=True)
 class GRPOSpec:
@@ -38,16 +85,12 @@ class GRPOSpec:
     seed: int
     output_dir: str
     save_steps: int | None
-    # Score each completion only up to the first occurrence of this string,
-    # inclusive (transfer-rulings T20). None means score the whole completion.
-    #
-    # Generation itself still runs to max_completion_length. This repo trains with
-    # TRL's transformers generate path (use_vllm is False), and TRL 1.13 calls
-    # model.generate without a tokenizer, so GRPOConfig(generation_kwargs=
-    # {"stop_strings": [...]}) would raise in transformers' StopStringCriteria
-    # setup at the first step. The loop tokens after the first </answer> therefore
-    # still sit in the completion mask and receive the group advantage; only the
-    # reward is computed on the truncated text.
+    # End each completion at the first occurrence of this string, inclusive.
+    # None (gsm8k) means no stop. Generation stops there (transfer-rulings T21:
+    # vLLM's stop with include_stop_str_in_output), so tokens after it are never
+    # sampled and never enter the loss. The reward is also computed on the text
+    # truncated there (T20), as defence in depth: the token that completes the
+    # stop string can carry a few trailing characters.
     stop: str | None = None
 
 
@@ -58,6 +101,98 @@ def checkpoint_schedule(max_steps: int, save_steps: int | None) -> list[int]:
     if not steps or steps[-1] != max_steps:
         steps.append(max_steps)
     return steps
+
+
+def generation_kwargs_for(stop: str | None) -> dict | None:
+    """Extra vLLM SamplingParams for GRPO rollouts.
+
+    include_stop_str_in_output is set for parity with pass@k's sampling_kwargs.
+    TRL decodes the returned token ids rather than vLLM's text, and the token that
+    completes the stop string is always among them, so the tag reaches the reward
+    either way. Never add a seed here: TRL's colocate mode submits each prompt
+    num_generations times with n=1, and a per-request seed would make every
+    completion in a group identical.
+    """
+    if not stop:
+        return None
+    return {"stop": [stop], "include_stop_str_in_output": True}
+
+
+def build_grpo_config_kwargs(spec: GRPOSpec) -> dict:
+    """Keyword arguments for trl.GRPOConfig. Pure, so the config is testable on CPU."""
+    return dict(
+        output_dir=spec.output_dir,
+        max_steps=spec.max_steps,
+        learning_rate=spec.learning_rate,
+        beta=spec.beta,
+        temperature=spec.temperature,
+        num_generations=spec.num_generations,
+        # See PROMPTS_PER_STEP above: pins the batch shape so the protocol is
+        # identical across models and machines.
+        per_device_train_batch_size=spec.num_generations,
+        gradient_accumulation_steps=PROMPTS_PER_STEP,
+        save_steps=spec.save_steps or spec.max_steps,
+        logging_steps=1,
+        seed=spec.seed,
+        bf16=True,
+        report_to=[],
+        # Rollout generation (transfer-rulings T21); see the constants above.
+        use_vllm=True,
+        vllm_mode="colocate",
+        vllm_tensor_parallel_size=1,
+        vllm_gpu_memory_utilization=VLLM_GPU_MEMORY_UTILIZATION,
+        vllm_enable_sleep_mode=VLLM_ENABLE_SLEEP_MODE,
+        vllm_max_model_length=VLLM_MAX_MODEL_LENGTH,
+        vllm_importance_sampling_correction=VLLM_IMPORTANCE_SAMPLING_CORRECTION,
+        generation_kwargs=generation_kwargs_for(spec.stop),
+    )
+
+
+def check_fits_vllm_context(max_prompt_tokens: int, max_completion_length: int) -> None:
+    """vLLM ends a sequence at max_model_len, so a prompt long enough to push prompt
+    plus completion cap past it would silently shorten completions, a protocol
+    change. Refuse instead."""
+    if max_prompt_tokens + max_completion_length > VLLM_MAX_MODEL_LENGTH:
+        raise ValueError(
+            f"longest prompt ({max_prompt_tokens} tokens) plus max_completion_length "
+            f"({max_completion_length}) exceeds vllm_max_model_length "
+            f"({VLLM_MAX_MODEL_LENGTH}); completions would be cut short"
+        )
+
+
+class CompletionStats:
+    """Counts what the reward function sees, for the run manifest. With a stop
+    string, max_chars_after_first_stop shows whether generation actually stopped:
+    a few characters at most if it did, hundreds if the model ran on to the cap."""
+
+    def __init__(self, stop: str | None) -> None:
+        self.stop = stop
+        self.n = 0
+        self.chars = 0
+        self.n_with_stop = 0
+        self.max_after = 0
+
+    def wrap(self, reward_fn: Callable) -> Callable:
+        def wrapped(completions, **kwargs):
+            for c in completions:
+                self.n += 1
+                self.chars += len(c)
+                if self.stop:
+                    i = c.find(self.stop)
+                    if i >= 0:
+                        self.n_with_stop += 1
+                        self.max_after = max(self.max_after, len(c) - i - len(self.stop))
+            return reward_fn(completions=completions, **kwargs)
+
+        return wrapped
+
+    def as_dict(self) -> dict:
+        return {
+            "n_completions": self.n,
+            "mean_chars": self.chars / self.n if self.n else None,
+            "n_with_stop": self.n_with_stop if self.stop else None,
+            "max_chars_after_first_stop": self.max_after if self.stop else None,
+        }
 
 
 def build_reward_fn(items: list[TaskItem], verify_fn, stop: str | None = None) -> Callable:
@@ -96,11 +231,14 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         )
 
     recorder = GroupedRewardRecorder(num_generations=spec.num_generations)
-    reward_fn = recorder.wrap(build_reward_fn(spec.items, spec.verify_fn, stop=spec.stop))
+    stats = CompletionStats(spec.stop)
+    reward_fn = recorder.wrap(
+        stats.wrap(build_reward_fn(spec.items, spec.verify_fn, stop=spec.stop))
+    )
 
     if trainer_factory is None:
         from datasets import Dataset
-        from transformers import AutoTokenizer
+        from transformers import AutoTokenizer, set_seed
         from trl import GRPOConfig, GRPOTrainer
 
         tokenizer = AutoTokenizer.from_pretrained(spec.model_path)
@@ -109,27 +247,24 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         entropy_probe = EntropyProbe(
             tokenizer, [it.prompt for it in spec.items[:ENTROPY_BATCH_SIZE]]
         )
-        config = GRPOConfig(
-            output_dir=spec.output_dir,
-            max_steps=spec.max_steps,
-            learning_rate=spec.learning_rate,
-            beta=spec.beta,
-            temperature=spec.temperature,
-            num_generations=spec.num_generations,
-            # See PROMPTS_PER_STEP above: pins the batch shape so the protocol is
-            # identical across models and machines.
-            per_device_train_batch_size=spec.num_generations,
-            gradient_accumulation_steps=PROMPTS_PER_STEP,
-            save_steps=spec.save_steps or spec.max_steps,
-            logging_steps=1,
-            seed=spec.seed,
-            bf16=True,
-            report_to=[],
+        config = GRPOConfig(**build_grpo_config_kwargs(spec))
+        check_fits_vllm_context(
+            max(len(tokenizer(it.prompt).input_ids) for it in spec.items),
+            config.max_completion_length,
         )
         dataset = Dataset.from_dict({"prompt": [it.prompt for it in spec.items]})
-        trainer_factory = lambda **kw: GRPOTrainer(  # noqa: E731
-            model=spec.model_path, args=config, train_dataset=dataset, **kw
-        )
+
+        def trainer_factory(**kw):
+            trainer = GRPOTrainer(
+                model=spec.model_path, args=config, train_dataset=dataset, **kw
+            )
+            # The colocated vLLM engine is built in-process after Trainer.__init__
+            # has seeded torch with spec.seed, and vLLM's worker re-seeds torch's
+            # global generators with its engine seed, which TRL fixes at 0. Unseeded
+            # vLLM requests sample from that global CUDA generator, so without this
+            # every run seed would draw the same random stream (transfer-rulings T21).
+            set_seed(spec.seed)
+            return trainer
     else:
         entropy_probe = _NullEntropyProbe()
 
@@ -138,15 +273,26 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         entropy_probe=entropy_probe,
         model_getter=lambda: getattr(trainer, "model", None),
     )
-    trainer = trainer_factory(reward_funcs=[reward_fn], callbacks=[callback])
-    model_obj = getattr(trainer, "model", None)
-    if model_obj is not None and hasattr(model_obj, "peft_config"):
-        raise ValueError(
-            "trainer was constructed with a PEFT/LoRA model, which this benchmark "
-            "forbids: LoRA constrains weight movement, the quantity under measurement."
-        )
-    trainer.train()
-    trainer.save_model(spec.output_dir)
+    saved_env = {key: os.environ.get(key) for key in VLLM_ENV_KEYS}
+    trainer = None
+    try:
+        trainer = trainer_factory(reward_funcs=[reward_fn], callbacks=[callback])
+        model_obj = getattr(trainer, "model", None)
+        if model_obj is not None and hasattr(model_obj, "peft_config"):
+            raise ValueError(
+                "trainer was constructed with a PEFT/LoRA model, which this benchmark "
+                "forbids: LoRA constrains weight movement, the quantity under measurement."
+            )
+        trainer.train()
+        trainer.save_model(spec.output_dir)
+    finally:
+        # The colocated engine runs in this process. Shut it down explicitly
+        # before anything else touches the GPU: dropping the trainer alone leaves
+        # its weights, KV cache and distributed state alive (vLLM gc.freeze()s
+        # them at startup), and the post-eval's engine would then fail its
+        # free-memory check (issue #33, transfer-rulings T21).
+        _shutdown_colocated_vllm(trainer)
+        _restore_env(saved_env)
 
     Path(spec.output_dir).mkdir(parents=True, exist_ok=True)
     manifest = {
@@ -164,10 +310,18 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         "temperature": spec.temperature,
         "seed": spec.seed,
         "n_items": len(spec.items),
-        # The reward is scored up to completion_stop; generation is not stopped
-        # there (see GRPOSpec.stop), so it runs to max_completion_length.
+        # Rollouts come from a colocated vLLM engine that stops at
+        # generation_stop (transfer-rulings T21); the reward is also scored only
+        # up to completion_stop (T20). Both are the suite's stop, None for gsm8k.
+        "generation_backend": GENERATION_BACKEND,
+        "generation_stop": spec.stop,
+        "include_stop_str_in_output": spec.stop is not None,
         "completion_stop": spec.stop,
-        "generation_runs_to_cap": True,
+        "vllm_gpu_memory_utilization": VLLM_GPU_MEMORY_UTILIZATION,
+        "vllm_enable_sleep_mode": VLLM_ENABLE_SLEEP_MODE,
+        "vllm_max_model_length": VLLM_MAX_MODEL_LENGTH,
+        "vllm_importance_sampling_correction": VLLM_IMPORTANCE_SAMPLING_CORRECTION,
+        "completion_stats": stats.as_dict(),
         "expected_checkpoints": checkpoint_schedule(spec.max_steps, spec.save_steps),
         "n_step_records": len(callback.records),
     }
@@ -188,6 +342,23 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
     del callback, model_obj, trainer
     _release_gpu()
     return records
+
+
+def _shutdown_colocated_vllm(trainer) -> None:
+    generation = getattr(trainer, "vllm_generation", None)
+    llm = getattr(generation, "llm", None)
+    if llm is None:
+        return
+    shutdown_vllm_engine(llm)
+    generation.llm = None
+
+
+def _restore_env(saved: dict[str, str | None]) -> None:
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 class _NullEntropyProbe:

@@ -42,6 +42,22 @@ def sampling_kwargs(n: int, temperature: float, seed: int, stop: str | None) -> 
     return kw
 
 
+def shutdown_vllm_engine(llm) -> None:
+    """Shut a vLLM LLM's engine down now, not whenever its finaliser runs.
+
+    vLLM 0.30's LLM has no shutdown method; its engine-core client does. For the
+    default multiprocess engine (the pass@k evaluations) that terminates and joins
+    the EngineCore subprocess, so its GPU memory is back before the caller goes on
+    to train. For an in-process engine (TRL's colocated GRPO engine) it shuts the
+    executor down, undoes the engine's gc.freeze() and tears down the distributed
+    state, without which deleting the engine leaks its weights and KV cache
+    (transfer-rulings T21). A no-op for an object without an engine core.
+    """
+    engine_core = getattr(getattr(llm, "llm_engine", None), "engine_core", None)
+    if engine_core is not None:
+        engine_core.shutdown()
+
+
 def _vllm_generate(model_path: str, prompts: dict[str, str], n: int,
                    temperature: float, seed: int, stop: str | None = None) -> list[list[str]]:
     from vllm import LLM, SamplingParams
@@ -49,13 +65,19 @@ def _vllm_generate(model_path: str, prompts: dict[str, str], n: int,
     # The engine MUST be released before returning. run_stage0 performs four
     # evaluations plus two trainings per variant across six variants in a single
     # process, so an un-released LLM holding 0.85 of device memory would make the
-    # second evaluation OOM and the first real run would never finish.
+    # second evaluation OOM and the first real run would never finish. The probe
+    # trains right after the pre-eval in the same process, and GRPO's colocated
+    # engine checks at startup that its share of the GPU is free.
     llm = LLM(model=model_path, seed=seed, dtype="bfloat16", gpu_memory_utilization=0.85)
     try:
         params = SamplingParams(**sampling_kwargs(n, temperature, seed, stop))
         outputs = llm.generate(list(prompts.values()), params)
         return [[o.text for o in out.outputs] for out in outputs]
     finally:
+        try:
+            shutdown_vllm_engine(llm)
+        except Exception:
+            pass
         try:
             del llm
             import gc

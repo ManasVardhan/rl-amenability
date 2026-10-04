@@ -108,7 +108,9 @@ def test_run_grpo_records_the_stop_in_the_manifest(tmp_path):
     run_grpo(spec, trainer_factory=lambda **kw: T())
     manifest = json.loads((tmp_path / "run_manifest.json").read_text())
     assert manifest["completion_stop"] == "</answer>"
-    assert manifest["generation_runs_to_cap"] is True
+    # T21: generation itself stops at the first </answer> (vLLM stop string).
+    assert manifest["generation_stop"] == "</answer>"
+    assert "generation_runs_to_cap" not in manifest
 
 
 def test_sft_targets_are_cut_at_the_first_stop():
