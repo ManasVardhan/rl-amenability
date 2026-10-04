@@ -240,6 +240,7 @@ def select_candidate(
             selected = name
 
     out = {"selected": selected, "launch": selected is not None, "candidates": rows,
+           "models": models,
            "floored_exempt": sorted(floored), "reason": None,
            "diagnosis_candidate": None, "diagnosis": [], "remedies": []}
     if selected is not None:

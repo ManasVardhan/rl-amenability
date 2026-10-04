@@ -210,7 +210,28 @@ prefix, otherwise the ids index the batch manifest and run a different job:
     uv run python -m scripts.analyze_transfer --work-dir results/transfer
     # writes results/transfer/report.md, report.json, leaderboard_preview.md
 
+## 6. Difficulty calibration (9 GPU jobs, before the batch)
+
+Transfer-rulings T22. Samples every difficulty candidate (`src/amenability/suites/difficulty.py`)
+for each of the nine pilot models, 8 completions per item over the candidate's
+300-item pool, with the GRPO rollout sampling. Sampling only, so any bf16 GPU
+(the script requests `a100|l40s|a40`):
+
+    sbatch --array=0-8 scripts/slurm/calibrate.sbatch
+    # results land in results/calibration/<model>.json (one per model)
+    grep -l Traceback logs/calibrate_*.out
+
+A task killed by the walltime resumes from its finished candidates when rerun
+(`sbatch --array=<id> ...`). Then, on any machine:
+
+    uv run python -m scripts.analyze_calibration --dir results/calibration
+    # prints the tables, writes results/calibration/selection.json and report.md
+
+The selection rule is applied mechanically; if `selection.json` says
+`batch_may_launch: false`, the batch does not launch and the owner decides.
+
 ## Dry run (any machine, no GPU, SCRATCH need not be set)
 
     uv run python -m scripts.make_transfer_jobs --out /tmp/jobs.txt
     SLURM_ARRAY_TASK_ID=3 DRY_RUN=1 JOBS_FILE=/tmp/jobs.txt bash scripts/slurm/probe_array.sbatch
+    SLURM_ARRAY_TASK_ID=3 DRY_RUN=1 bash scripts/slurm/calibrate.sbatch
