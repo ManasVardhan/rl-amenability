@@ -1,12 +1,14 @@
 #!/bin/bash
 # scripts/slurm/calibrate.sbatch
-# Difficulty calibration (transfer-rulings T22): one model per array task, every
+# Difficulty calibration (transfer-rulings T22, T23): one model per array task, every
 # difficulty candidate, 8 samples per item with the GRPO rollout sampling.
 # Task i runs ROSTER[i] of scripts/calibrate_difficulty.py (9 models). Launch:
 #   sbatch --array=0-8 scripts/slurm/calibrate.sbatch
 # Sampling only, no training, so any bf16 GPU will do (as for the pilot, T18);
 # never v100 or p100. Results land in results/calibration/<model>.json, written
-# after each candidate; a rerun of a task resumes from the cached candidates.
+# after each candidate; a rerun of a task resumes from the cached candidates,
+# except candidates written before T23 (no per-item category counts, so no
+# shaped group signal), which it recomputes with the same seeds.
 #SBATCH --job-name=amen-calib
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1

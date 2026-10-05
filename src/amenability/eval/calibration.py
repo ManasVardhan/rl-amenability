@@ -13,9 +13,15 @@ the GRPO rollout sampling, for every difficulty candidate
   equal to pass@8 here; reported under its own name because it is the quantity
   the selection rule reads;
 - a failure taxonomy over all samples (CATEGORIES), which separates answer-format
-  failures from search failures.
+  failures from search failures;
+- the shaped group-signal rate (transfer-rulings T23): the fraction of items
+  whose 8 shaped TRAINING rewards (1.0 correct, 0.1 answer block, 0.0 none;
+  CATEGORY_REWARD) are not all equal, i.e. the share of GRPO groups with a
+  nonzero advantage under the shaped reward. Computed from the per-item
+  category counts, which are saved as `per_item_categories`.
 
-`select_candidate` is the pre-registered selection rule, applied mechanically.
+`select_candidate` is the pre-registered selection rule, applied mechanically:
+on the strict group-signal rate (T22) or on the shaped one (T23).
 """
 from __future__ import annotations
 
@@ -37,6 +43,7 @@ from amenability.training.grpo import (
     ROLLOUT_TOP_P,
     generation_kwargs_for,
 )
+from amenability.training.reward import CORRECT_SCORE, FORMAT_SCORE, NO_ANSWER_SCORE
 
 N_SAMPLES = 8  # the GRPO group size, ProbeConfig.num_generations
 
@@ -53,6 +60,20 @@ N_SAMPLES = 8  # the GRPO group size, ProbeConfig.num_generations
 CATEGORIES = ("no_answer_tag", "unparseable_answer", "parseable_wrong", "correct")
 FORMAT_FAILURES = ("no_answer_tag", "unparseable_answer")
 
+# The shaped training reward (transfer-rulings T23) of each category: an answer
+# block the verifier rejects, parseable or not, earns the format score. A test
+# checks this equals amenability.training.reward.shaped_reward per completion.
+CATEGORY_REWARD = {
+    "no_answer_tag": NO_ANSWER_SCORE,
+    "unparseable_answer": FORMAT_SCORE,
+    "parseable_wrong": FORMAT_SCORE,
+    "correct": CORRECT_SCORE,
+}
+
+# Which group-signal rate the selection rule gates on.
+STRICT_SIGNAL = "group_signal_rate"            # T22: >= 1 correct of 8
+SHAPED_SIGNAL = "shaped_group_signal_rate"     # T23: 8 shaped rewards not all equal
+
 # The selection rule (T22). Thresholds are inclusive.
 MIN_GROUP_SIGNAL = 0.15
 MAX_BEST_PASS1 = 0.80
@@ -68,6 +89,11 @@ PILOT_FLOORED = {
 
 REMEDIES = (
     "partial format reward as in TinyZero (0.1 for a well-formed wrong answer)",
+    "a larger GRPO group size",
+    "accepting zero-signal models (they tie near score 0)",
+)
+# After T23 the format reward is in place, so it is not offered again.
+REMEDIES_SHAPED = (
     "a larger GRPO group size",
     "accepting zero-signal models (they tie near score 0)",
 )
@@ -146,6 +172,8 @@ def _block_stats(cats_per_item: list[list[str]]) -> dict:
         "pass@8": sum(pass_at_k(len(cats), c, N_SAMPLES)
                       for c, cats in zip(correct, cats_per_item)) / n_items,
         "group_signal_rate": sum(1 for c in correct if c > 0) / n_items,
+        SHAPED_SIGNAL: sum(1 for cats in cats_per_item
+                           if len({CATEGORY_REWARD[x] for x in cats}) > 1) / n_items,
         "taxonomy_counts": counts,
         "taxonomy": taxonomy,
         "format_failure_share": sum(taxonomy[c] for c in FORMAT_FAILURES),
@@ -174,6 +202,7 @@ def summarize_candidate(
     examples: dict[str, list] = {cat: [] for cat in CATEGORIES}
     by_bucket: dict[int, list[list[str]]] = {}
     per_item_correct: dict[str, int] = {}
+    per_item_categories: dict[str, dict[str, int]] = {}
     for it, comps in zip(items, completions):
         if len(comps) != N_SAMPLES:
             raise ValueError(f"{len(comps)} samples for {it.task_id}, expected {N_SAMPLES}")
@@ -181,6 +210,7 @@ def summarize_candidate(
         cats_per_item.append(cats)
         by_bucket.setdefault(it.difficulty, []).append(cats)
         per_item_correct[it.task_id] = cats.count("correct")
+        per_item_categories[it.task_id] = {cat: cats.count(cat) for cat in CATEGORIES}
         for c, cat in zip(comps, cats):
             examples[cat].append(
                 {"task_id": it.task_id, "bucket": it.difficulty,
@@ -190,6 +220,9 @@ def summarize_candidate(
         "by_bucket": {str(b): _block_stats(v) for b, v in sorted(by_bucket.items())},
         "pool": _block_stats(cats_per_item),
         "per_item_correct": per_item_correct,
+        # Per item, the count of each category over its 8 samples (T23): enough
+        # to recompute either reward's group signal without the completions.
+        "per_item_categories": per_item_categories,
         "examples": {cat: _spread(v, n_examples) for cat, v in examples.items()},
     }
 
@@ -198,16 +231,20 @@ def select_candidate(
     results: dict[str, dict[str, dict]],
     order: list[tuple[str, bool]],
     floored: set[str] | frozenset[str],
+    signal_key: str = STRICT_SIGNAL,
 ) -> dict:
-    """The T22 selection rule for one suite.
+    """The T22 selection rule for one suite, or with signal_key=SHAPED_SIGNAL the
+    T23 rule: identical except that (a) reads the shaped group-signal rate. The
+    strict rate is reported per model and candidate (correct_signal), not gated.
 
     results: model -> candidate name -> summary (only "pool" is read).
     order: (candidate, guesser-eligible) from hardest to easiest.
     floored: models floored on this suite in the pilot; exempt from (a).
 
     Walk the eligible candidates from hardest to easiest and select the first
-    with (a) every non-floored model's pool group-signal rate >= 0.15 and (b) the
-    best model's pool pass@1 <= 0.80. A model with no result for a candidate
+    with (a) every non-floored model's pool signal rate >= 0.15 and (b) the best
+    model's pool pass@1 <= 0.80. A model with no result for a candidate, or a
+    result without the signal_key field (a calibration written before T23),
     fails (a) for it. If none is selected the batch does not launch; when no
     candidate meets (a), every model failing (a) on the easiest eligible
     candidate is diagnosed as format (no_answer_tag + unparseable_answer >= 50%
@@ -218,15 +255,19 @@ def select_candidate(
     rows = []
     selected = None
     for name, eligible in order:
-        failing, missing, pass1s = [], [], []
+        failing, missing, pass1s, correct_signal = [], [], [], {}
         for m in models:
             pool = results[m].get(name, {}).get("pool")
-            if pool is None:
+            if pool is None or signal_key not in pool:
                 if m in required:
                     missing.append(m)
-                continue
+                if pool is None:
+                    continue
             pass1s.append(pool["pass@1"])
-            if m in required and pool["group_signal_rate"] < MIN_GROUP_SIGNAL:
+            correct_signal[m] = pool.get(STRICT_SIGNAL)
+            if signal_key not in pool:
+                continue
+            if m in required and pool[signal_key] < MIN_GROUP_SIGNAL:
                 failing.append(m)
         best = max(pass1s) if pass1s else None
         meets_a = not failing and not missing
@@ -234,12 +275,14 @@ def select_candidate(
         rows.append({
             "candidate": name, "eligible": eligible, "failing_models": failing,
             "missing_models": missing, "best_pass1": best,
+            "correct_signal": correct_signal,
             "meets_signal": meets_a, "meets_headroom": meets_b,
         })
         if selected is None and eligible and meets_a and meets_b:
             selected = name
 
     out = {"selected": selected, "launch": selected is not None, "candidates": rows,
+           "signal_key": signal_key,
            "models": models,
            "floored_exempt": sorted(floored), "reason": None,
            "diagnosis_candidate": None, "diagnosis": [], "remedies": []}
@@ -252,10 +295,11 @@ def select_candidate(
             f"{MAX_BEST_PASS1}"
         )
         return out
+    what = "shaped group signal" if signal_key == SHAPED_SIGNAL else "group signal"
     out["reason"] = (
-        f"no candidate gives every non-floored model group signal >= {MIN_GROUP_SIGNAL}"
+        f"no candidate gives every non-floored model {what} >= {MIN_GROUP_SIGNAL}"
     )
-    out["remedies"] = list(REMEDIES)
+    out["remedies"] = list(REMEDIES_SHAPED if signal_key == SHAPED_SIGNAL else REMEDIES)
     if eligible_rows:
         easiest = eligible_rows[-1]
         out["diagnosis_candidate"] = easiest["candidate"]
@@ -263,7 +307,8 @@ def select_candidate(
             pool = results[m][easiest["candidate"]]["pool"]
             share = pool["format_failure_share"]
             out["diagnosis"].append({
-                "model": m, "group_signal_rate": pool["group_signal_rate"],
+                "model": m, "signal_rate": pool[signal_key],
+                "correct_signal_rate": pool.get(STRICT_SIGNAL),
                 "format_failure_share": share,
                 "failure_mode": "format" if share >= FORMAT_SHARE_THRESHOLD else "search",
             })

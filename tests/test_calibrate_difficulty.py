@@ -127,3 +127,34 @@ def test_cli_model_index_selects_from_the_roster(tmp_path):
           "--out-dir", str(tmp_path)], make_engine=make)
     assert (tmp_path / "qwen2.5-0.5b.json").exists()
     assert log[0] == ("load", "Qwen/Qwen2.5-0.5B", 0)
+
+
+# Transfer-rulings T23: the shaped group signal needs per-item category counts.
+
+def test_each_candidate_saves_per_item_categories_and_the_shaped_signal(tmp_path):
+    log = []
+    make, _ = _factory(log)
+    out = calibrate_model("m1", "hf/m1", ["cd-current"], out_dir=tmp_path,
+                          make_engine=make, n_per_bucket=1)
+    c = json.loads(out.read_text())["candidates"]["cd-current"]
+    assert len(c["per_item_categories"]) == 3
+    expected = dict.fromkeys(CATEGORIES, 0) | {"unparseable_answer": 8}
+    assert all(v == expected for v in c["per_item_categories"].values())
+    assert c["pool"]["shaped_group_signal_rate"] == 0.0     # all 0.1: no signal
+
+
+def test_a_cached_candidate_without_per_item_categories_is_recomputed(tmp_path):
+    log = []
+    make, _ = _factory(log)
+    out = calibrate_model("m1", "hf/m1", ["cd-current", "cd-easy"], out_dir=tmp_path,
+                          make_engine=make, n_per_bucket=1)
+    data = json.loads(out.read_text())
+    del data["candidates"]["cd-current"]["per_item_categories"]   # a pre-T23 record
+    out.write_text(json.dumps(data))
+    log.clear()
+    calibrate_model("m1", "hf/m1", ["cd-current", "cd-easy"], out_dir=tmp_path,
+                    make_engine=make, n_per_bucket=1)
+    assert [e[0] for e in log] == ["load", "generate", "release"]   # cd-current only
+    data = json.loads(out.read_text())
+    assert list(data["candidates"]) == ["cd-current", "cd-easy"]
+    assert "per_item_categories" in data["candidates"]["cd-current"]

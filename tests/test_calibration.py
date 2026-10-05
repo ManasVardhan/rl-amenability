@@ -3,9 +3,11 @@ per-candidate summary, the rollout sampling it uses and the selection rule."""
 import pytest
 
 from amenability.eval.calibration import (
-    CATEGORIES, classify_completion, rollout_sampling_kwargs, select_candidate,
-    summarize_candidate,
+    CATEGORIES, CATEGORY_REWARD, classify_completion, rollout_sampling_kwargs,
+    select_candidate, summarize_candidate,
 )
+from amenability.suites.base import truncate_at_stop
+from amenability.training.reward import shaped_reward
 from amenability.suites.base import ANSWER_STOP, TaskItem
 from amenability.suites.countdown import verify_countdown
 from amenability.suites.graphpath import generate_graphpath, verify_graphpath
@@ -193,6 +195,8 @@ def test_no_candidate_meets_signal_then_reports_format_or_search():
     assert out["reason"] == "no candidate gives every non-floored model group signal >= 0.15"
     diag = {d["model"]: d["failure_mode"] for d in out["diagnosis"]}
     assert diag == {"fmt": "format", "srch": "search"}
+    assert {d["model"]: d["signal_rate"] for d in out["diagnosis"]} == {"fmt": 0.1, "srch": 0.12}
+    assert "partial format reward as in TinyZero (0.1 for a well-formed wrong answer)" in out["remedies"]
     assert out["diagnosis_candidate"] == "x-easy"   # the easiest eligible candidate
 
 
@@ -208,3 +212,82 @@ def test_a_model_missing_from_a_candidate_fails_it():
     out = select_candidate(results, [("x-current", True)], floored=set())
     assert out["selected"] is None
     assert out["candidates"][0]["missing_models"] == ["b"]
+
+
+
+# ---- transfer-rulings T23: the shaped training reward ----
+
+@pytest.mark.parametrize("suite_key,verify", [("countdown", verify_countdown),
+                                              ("graphpath", verify_graphpath)])
+def test_category_reward_is_the_training_reward(suite_key, verify):
+    it = _cd() if suite_key == "countdown" else _graph_item_and_path()[0]
+    path = _graph_item_and_path()[1]
+    pool = ["", "thinking", "<answer>", "<answer></answer>", "<answer>3*5-2</answer>",
+            "<answer>13</answer>", "<answer>prose</answer>", "<answer>3+5+2</answer>",
+            "<answer>" + "->".join(path) + "</answer>", "<answer>A->B->C</answer>",
+            "<answer>5*3-2=13</answer>junk", "answer>\n13\n</answer>"]
+    for c in pool:
+        want = shaped_reward(verify, it, truncate_at_stop(c, ANSWER_STOP))
+        assert CATEGORY_REWARD[classify_completion(suite_key, it, c)] == want, c
+
+
+def test_summary_reports_the_shaped_group_signal_and_per_item_categories():
+    items = [_cd(tid=f"i{k}", difficulty=2) for k in range(5)]
+    good, wrong, prose, none = ("<answer>3*5-2</answer>", "<answer>3+5+2</answer>",
+                                "<answer>it is 13</answer>", "thinking...")
+    completions = [
+        [good] * 2 + [wrong] * 6,      # 1.0 vs 0.1: signal on both
+        [none] * 4 + [prose] * 4,      # 0.0 vs 0.1: shaped signal only
+        [prose] * 4 + [wrong] * 4,     # all 0.1: no signal on either
+        [none] * 8,                    # all 0.0: none
+        [good] * 8,                    # all 1.0: strict ">= 1 correct" only
+    ]
+    s = summarize_candidate("countdown", items, completions)
+    pool = s["pool"]
+    assert pool["group_signal_rate"] == pytest.approx(2 / 5)          # i0, i4
+    assert pool["shaped_group_signal_rate"] == pytest.approx(2 / 5)   # i0, i1
+    assert s["by_bucket"]["2"]["shaped_group_signal_rate"] == pytest.approx(2 / 5)
+    assert s["per_item_categories"]["i1"] == {
+        "no_answer_tag": 4, "unparseable_answer": 4, "parseable_wrong": 0, "correct": 0}
+    assert s["per_item_categories"]["i2"] == {
+        "no_answer_tag": 0, "unparseable_answer": 4, "parseable_wrong": 4, "correct": 0}
+    assert set(s["per_item_categories"]) == {f"i{k}" for k in range(5)}
+
+
+def _shp(shaped, strict, p1, fmt=0.0):
+    return {"pool": {"shaped_group_signal_rate": shaped, "group_signal_rate": strict,
+                     "pass@1": p1, "format_failure_share": fmt}}
+
+
+def test_shaped_rule_gates_on_the_shaped_signal_and_reports_the_strict_one():
+    results = {
+        "strong": {"x-current": _shp(0.9, 0.9, 0.6), "x-easy": _shp(0.9, 0.9, 0.7)},
+        "weak": {"x-current": _shp(0.1, 0.0, 0.0), "x-easy": _shp(0.3, 0.02, 0.01)},
+    }
+    out = select_candidate(results, [("x-current", True), ("x-easy", True)], floored=set(),
+                           signal_key="shaped_group_signal_rate")
+    assert out["selected"] == "x-easy"
+    assert out["signal_key"] == "shaped_group_signal_rate"
+    rows = {r["candidate"]: r for r in out["candidates"]}
+    assert rows["x-current"]["failing_models"] == ["weak"]
+    assert rows["x-easy"]["correct_signal"] == {"strong": 0.9, "weak": 0.02}
+
+
+def test_shaped_rule_treats_a_result_without_the_shaped_signal_as_missing():
+    # A calibration file written before T23 has no per-item categories, so no
+    # shaped signal: the model blocks the candidate instead of passing silently.
+    results = {"a": {"x-current": _summ(0.9, 0.5)}}
+    out = select_candidate(results, [("x-current", True)], floored=set(),
+                           signal_key="shaped_group_signal_rate")
+    assert out["selected"] is None
+    assert out["candidates"][0]["missing_models"] == ["a"]
+
+
+def test_shaped_rule_failure_does_not_offer_the_format_reward_again():
+    results = {"a": {"x-current": _shp(0.05, 0.0, 0.0, fmt=0.9)}}
+    out = select_candidate(results, [("x-current", True)], floored=set(),
+                           signal_key="shaped_group_signal_rate")
+    assert out["launch"] is False
+    assert out["remedies"] and not any("format reward" in r for r in out["remedies"])
+    assert out["diagnosis"][0]["signal_rate"] == 0.05
+    assert out["diagnosis"][0]["correct_signal_rate"] == 0.0

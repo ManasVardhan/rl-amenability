@@ -7,12 +7,15 @@ which is exactly the 300-item pool a probe job trains on), sample 8 completions
 per item with the GRPO rollout sampling (temperature 1.0, top_p 1.0, top_k 0,
 768 tokens, stop at the first </answer> kept in the output), and write per
 bucket and over the pool: pass@1, pass@8, the group-signal rate (items with at
-least one correct of 8) and the failure taxonomy, plus example completions.
+least one correct of 8), the shaped group-signal rate (items whose 8 shaped
+training rewards are not all equal, transfer-rulings T23), the failure taxonomy
+and its per-item counts, plus example completions.
 
 One vLLM engine per model, reused across candidates and shut down before the
 next model loads. Output: <out-dir>/<model>.json, rewritten after each
 candidate, so a job killed by the walltime resumes where it stopped. A cached
-candidate is reused only if it was made with the same settings.
+candidate is reused only if it was made with the same settings and has per-item
+category counts (written since T23).
 
     uv run python -m scripts.calibrate_difficulty --model qwen2.5-0.5b
     uv run python -m scripts.calibrate_difficulty --model-index $SLURM_ARRAY_TASK_ID
@@ -113,7 +116,16 @@ def calibrate_model(
     if out.exists() and not force:
         cached = json.loads(out.read_text())
         if all(cached.get(k) == v for k, v in settings.items()):
-            data["candidates"] = cached.get("candidates", {})
+            # A candidate written before transfer-rulings T23 has no per-item
+            # category counts, so no shaped group signal: recompute it. Same
+            # seeds, so its strict numbers reproduce.
+            data["candidates"] = {
+                k: v for k, v in cached.get("candidates", {}).items()
+                if "per_item_categories" in v
+            }
+            stale = sorted(set(cached.get("candidates", {})) - set(data["candidates"]))
+            if stale:
+                print(f"{out}: {', '.join(stale)} predate per-item categories (T23); recomputing")
         else:
             print(f"{out} was made with other settings; recomputing every candidate")
 
