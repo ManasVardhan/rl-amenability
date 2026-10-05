@@ -8,7 +8,7 @@ from pathlib import Path
 
 from amenability.probe.telemetry import extract_features
 from amenability.registry.loader import load_registry
-from amenability.scoring.baselines import baseline_naive
+from amenability.scoring.naive_correct import baseline_naive_correct
 from amenability.scoring.gates import evaluate_gate_a, evaluate_gate_b
 from amenability.scoring.score import amenability_score
 from prereg.freeze import verify_freeze
@@ -47,7 +47,8 @@ def run_stage0(config: Stage0Config, runner, root: Path) -> dict:
     features = [extract_features(t) for t in telemetries]
     scores = amenability_score(features)
     outcomes = [runner.full_run(entry["variant_key"]) for entry in plan]
-    naive = baseline_naive(telemetries, config.full_steps)
+    # The probe's correctness trace, not its shaped training reward (T23).
+    naive = baseline_naive_correct(telemetries, config.full_steps)
 
     variants = []
     for entry, score, outcome, nv, feat in zip(plan, scores, outcomes, naive, features):

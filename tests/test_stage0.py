@@ -24,7 +24,8 @@ class FakeRunner:
         steps = [
             StepRecord(step=i, mean_reward=0.1 + 0.005 * a * i, group_reward_std=0.2,
                        zero_advantage_frac=0.1, policy_entropy=2.0 - (1.0 - a) * 0.1 * i,
-                       kl=0.01, grad_norm=1.0)
+                       kl=0.01, grad_norm=1.0, mean_correct=0.05 + 0.004 * a * i,
+                       zero_correct_group_frac=0.5)
             for i in range(1, 11)
         ]
         return ProbeTelemetry(
@@ -101,3 +102,16 @@ def test_run_refuses_when_control_bases_are_reduced_to_one_family(monkeypatch, f
     with pytest.raises(ValueError, match="qwen2.5-0.5b") as excinfo:
         run_stage0(Stage0Config(), FakeRunner(), frozen_root)
     assert "llama-3.2-1b" in str(excinfo.value)
+
+
+def test_naive_baseline_fits_the_correctness_trace(frozen_root):
+    # Transfer-rulings T23: Gate B's naive baseline reads mean_correct, not the
+    # shaped training reward.
+    from amenability.scoring.baselines import naive_extrapolation
+    res = run_stage0(Stage0Config(), FakeRunner(), frozen_root)
+    runner = FakeRunner()
+    for v in res["variants"]:
+        t = runner.probe(v["variant_key"])
+        want = naive_extrapolation([s.step for s in t.steps],
+                                   [s.mean_correct for s in t.steps], 600)
+        assert v["naive"] == pytest.approx(want)
