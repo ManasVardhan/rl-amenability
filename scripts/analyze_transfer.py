@@ -34,6 +34,7 @@ MIN_COMPLETE = 8
 DECISIONS = ("INVARIANT", "PARTIAL", "DOMAIN_SPECIFIC", "INCONCLUSIVE_RELIABILITY", "INCONCLUSIVE_INCOMPLETE",
              "INCONCLUSIVE_DEGENERATE")
 PROTOCOL_ITEM_SEED = 0
+PROTOCOL_TRAIN_REWARD = "shaped"
 
 
 
@@ -64,6 +65,11 @@ def meta_mismatch(meta: dict) -> str | None:
             return f"meta {field}={meta[field]!r}, protocol expects {want!r}"
     if meta["n_step_records"] != cfg.probe_steps:
         return f"meta n_step_records={meta['n_step_records']!r}, protocol expects probe_steps={cfg.probe_steps!r}"
+    # Transfer-rulings T23: the probe trains on the shaped reward. Telemetry
+    # written before it (no field) or on another reward is not the protocol run.
+    if meta.get("train_reward") != PROTOCOL_TRAIN_REWARD:
+        return (f"meta train_reward={meta.get('train_reward')!r}, protocol expects "
+                f"{PROTOCOL_TRAIN_REWARD!r} (T23)")
     return None
 
 

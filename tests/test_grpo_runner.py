@@ -246,3 +246,95 @@ def test_run_grpo_empties_the_cuda_cache_when_cuda_is_available(tmp_path, monkey
     )
     run_grpo(spec, trainer_factory=lambda **kw: _FakeTrainer(**kw))
     assert calls == ["empty"]
+
+
+# Transfer-rulings T23: probe suites train on a shaped reward; correctness is
+# recorded beside it, and gsm8k (no train reward) keeps the binary reward.
+
+def _shaped(item, completion):
+    if verify(item, completion):
+        return 1.0
+    return 0.1 if completion.startswith("<") else 0.0
+
+
+def test_reward_fn_returns_the_train_reward_and_sinks_correctness():
+    sunk = []
+    fn = build_reward_fn(items(1), verify, train_reward_fn=_shaped,
+                         correctness_sink=sunk.extend)
+    rewards = fn(completions=["7", "<8", "8"], prompts=["p0"] * 3)
+    assert rewards == [1.0, 0.1, 0.0]
+    assert sunk == [1.0, 0.0, 0.0]
+
+
+def test_reward_fn_without_a_train_reward_stays_binary():
+    sunk = []
+    fn = build_reward_fn(items(1), verify, correctness_sink=sunk.extend)
+    assert fn(completions=["7", "<8"], prompts=["p0"] * 2) == [1.0, 0.0]
+    assert sunk == [1.0, 0.0]
+
+
+def test_the_train_reward_sees_the_truncated_completion():
+    seen = []
+
+    def spy(item, completion):
+        seen.append(completion)
+        return 0.0
+
+    fn = build_reward_fn(items(1), verify, stop="</answer>", train_reward_fn=spy)
+    fn(completions=["<answer>7</answer> loop <answer>8</answer>"], prompts=["p0"])
+    assert seen == ["<answer>7</answer>"]
+
+
+def test_unknown_prompt_scores_zero_on_both_rewards():
+    sunk = []
+    fn = build_reward_fn(items(1), verify, train_reward_fn=_shaped,
+                         correctness_sink=sunk.extend)
+    assert fn(completions=["<x"], prompts=["not-a-prompt"]) == [0.0]
+    assert sunk == [0.0]
+
+
+class _ShapedTrainer(_FakeTrainer):
+    def train(self):
+        for cb in self.captured["callbacks"]:
+            for step in (1, 2):
+                # Group of two: one format-only, one no-tag. Shaped rewards differ
+                # (0.1 vs 0.0), correctness is all zero.
+                self.captured["reward_funcs"][0](
+                    completions=["<8", "8"], prompts=["p0", "p0"]
+                )
+                cb.on_log(args=None,
+                          state=type("S", (), {"global_step": step, "log_history": []})(),
+                          control=None, logs={"kl": 0.01, "grad_norm": 1.0})
+
+
+def test_run_grpo_records_shaped_and_correctness_signal(tmp_path):
+    spec = GRPOSpec(
+        model_path="fake", model_key="m", items=items(), verify_fn=verify,
+        max_steps=2, num_generations=2, learning_rate=1e-6, beta=0.04,
+        temperature=1.0, seed=0, output_dir=str(tmp_path / "out"), save_steps=None,
+        train_reward_fn=_shaped,
+    )
+    records = run_grpo(spec, trainer_factory=lambda **kw: _ShapedTrainer(**kw))
+    r = records[0]
+    assert r.mean_reward == pytest.approx(0.05)
+    assert r.zero_advantage_frac == pytest.approx(0.0)
+    assert r.mean_correct == pytest.approx(0.0)
+    assert r.zero_correct_group_frac == pytest.approx(1.0)
+    manifest = json.loads((tmp_path / "out" / "run_manifest.json").read_text())
+    assert manifest["train_reward"] == "shaped"
+    assert manifest["train_reward_scores"] == {"correct": 1.0, "format": 0.1, "no_answer": 0.0}
+
+
+def test_run_grpo_without_a_train_reward_records_binary(tmp_path):
+    spec = GRPOSpec(
+        model_path="fake", model_key="m", items=items(), verify_fn=verify,
+        max_steps=2, num_generations=2, learning_rate=1e-6, beta=0.04,
+        temperature=1.0, seed=0, output_dir=str(tmp_path / "out"), save_steps=None,
+    )
+    records = run_grpo(spec, trainer_factory=lambda **kw: _FakeTrainer(**kw))
+    r = records[0]
+    assert r.mean_reward == pytest.approx(r.mean_correct) == pytest.approx(0.5)
+    assert r.zero_advantage_frac == r.zero_correct_group_frac == 0.0
+    manifest = json.loads((tmp_path / "out" / "run_manifest.json").read_text())
+    assert manifest["train_reward"] == "binary"
+    assert manifest["train_reward_scores"] is None

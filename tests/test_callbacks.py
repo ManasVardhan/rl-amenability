@@ -12,16 +12,15 @@ def test_zero_advantage_fraction_counts_uniform_groups():
     rec = GroupedRewardRecorder(num_generations=2)
     # group 0 = [1, 0] varied; group 1 = [1, 1] uniform -> 0.5 zero-advantage
     rec.wrap(lambda completions, **kw: [1.0, 0.0, 1.0, 1.0])(completions=["a"] * 4)
-    mean_r, group_std, zero_frac = rec.drain()
-    assert zero_frac == pytest.approx(0.5)
-    assert mean_r == pytest.approx(0.75)
+    d = rec.drain()
+    assert d.zero_advantage_frac == pytest.approx(0.5)
+    assert d.mean_reward == pytest.approx(0.75)
 
 
 def test_all_uniform_groups_give_zero_advantage_one():
     rec = GroupedRewardRecorder(num_generations=4)
     rec.wrap(lambda completions, **kw: [0.0] * 8)(completions=["a"] * 8)
-    _, _, zero_frac = rec.drain()
-    assert zero_frac == pytest.approx(1.0)
+    assert rec.drain().zero_advantage_frac == pytest.approx(1.0)
 
 
 def test_drain_resets_between_steps():
@@ -30,13 +29,12 @@ def test_drain_resets_between_steps():
     fn(completions=["a", "b"])
     rec.drain()
     fn(completions=["a", "b"])
-    mean_r, _, _ = rec.drain()
-    assert mean_r == pytest.approx(0.5)
+    assert rec.drain().mean_reward == pytest.approx(0.5)
 
 
 def test_drain_with_no_calls_returns_zeros():
     rec = GroupedRewardRecorder(num_generations=2)
-    assert rec.drain() == (0.0, 0.0, 0.0)
+    assert rec.drain() == (0.0, 0.0, 0.0, None, None)
 
 
 def test_ragged_batch_raises():
@@ -157,3 +155,50 @@ def test_three_training_steps_plus_a_trailing_log_give_exactly_three_records():
 
     assert len(cb.records) == 3
     assert [r.step for r in cb.records] == [1, 2, 3]
+
+
+# Transfer-rulings T23: correctness-only signal beside the training reward.
+
+def test_correctness_is_drained_beside_the_training_reward():
+    rec = GroupedRewardRecorder(num_generations=2)
+
+    def reward(completions, **kw):
+        rec.record_correct([0.0, 0.0, 1.0, 0.0])
+        return [0.1, 0.0, 1.0, 0.1]
+
+    rec.wrap(reward)(completions=["a"] * 4)
+    d = rec.drain()
+    assert d.mean_reward == pytest.approx(0.3)
+    assert d.zero_advantage_frac == pytest.approx(0.0)
+    assert d.mean_correct == pytest.approx(0.25)
+    assert d.zero_correct_group_frac == pytest.approx(0.5)
+
+
+def test_correctness_count_must_match_the_rewards():
+    rec = GroupedRewardRecorder(num_generations=2)
+
+    def reward(completions, **kw):
+        rec.record_correct([0.0])
+        return [0.1, 0.0]
+
+    rec.wrap(reward)(completions=["a", "b"])
+    with pytest.raises(ValueError, match="correctness"):
+        rec.drain()
+
+
+def test_callback_records_correctness_fields():
+    rec = GroupedRewardRecorder(num_generations=2)
+
+    def reward(completions, **kw):
+        rec.record_correct([0.0, 0.0])
+        return [0.1, 0.0]
+
+    fn = rec.wrap(reward)
+    cb = _callback(rec)
+    fn(completions=["a", "b"])
+    cb.on_log(args=None, state=_State(1), control=None, logs={})
+    r = cb.records[0]
+    assert r.mean_reward == pytest.approx(0.05)
+    assert r.zero_advantage_frac == pytest.approx(0.0)
+    assert r.mean_correct == pytest.approx(0.0)
+    assert r.zero_correct_group_frac == pytest.approx(1.0)

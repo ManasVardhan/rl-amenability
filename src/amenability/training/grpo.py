@@ -11,6 +11,7 @@ from amenability.probe.callbacks import GroupedRewardRecorder, TelemetryCallback
 from amenability.probe.entropy import EntropyProbe
 from amenability.probe.telemetry import StepRecord
 from amenability.suites.base import TaskItem, truncate_at_stop
+from amenability.training.reward import CORRECT_SCORE, FORMAT_SCORE, NO_ANSWER_SCORE
 
 ENTROPY_BATCH_SIZE = 16
 
@@ -104,6 +105,11 @@ class GRPOSpec:
     # truncated there (T20), as defence in depth: the token that completes the
     # stop string can carry a few trailing characters.
     stop: str | None = None
+    # The training reward (transfer-rulings T23). None (gsm8k) means the binary
+    # verify_fn is the reward. The probe suites pass their shaped reward
+    # (ProbeSuite.train_reward: 1.0 correct, 0.1 answer block, 0.0 none).
+    # verify_fn still defines correctness, recorded beside it in the telemetry.
+    train_reward_fn: Callable[[TaskItem, str], float] | None = None
 
 
 def checkpoint_schedule(max_steps: int, save_steps: int | None) -> list[int]:
@@ -212,7 +218,18 @@ class CompletionStats:
         }
 
 
-def build_reward_fn(items: list[TaskItem], verify_fn, stop: str | None = None) -> Callable:
+def build_reward_fn(
+    items: list[TaskItem],
+    verify_fn,
+    stop: str | None = None,
+    train_reward_fn: Callable[[TaskItem, str], float] | None = None,
+    correctness_sink: Callable[[list[float]], None] | None = None,
+) -> Callable:
+    """The TRL reward function. Returns train_reward_fn's reward per completion,
+    or the binary verify_fn reward when it is None, on the completion truncated
+    at stop. correctness_sink, if given, receives the strict 0/1 correctness of
+    the same completions in the same order (transfer-rulings T23). A completion
+    whose prompt matches no item scores 0.0 on both."""
     by_prompt = {it.prompt: it for it in items}
     if len(by_prompt) != len(items):
         raise ValueError(
@@ -228,13 +245,19 @@ def build_reward_fn(items: list[TaskItem], verify_fn, stop: str | None = None) -
                 "prompt text is not reaching the reward function as expected, so every "
                 "reward would be 0.0 and the run would silently produce a null result"
             )
-        out = []
+        out, correct = [], []
         for prompt, completion in zip(prompts, completions):
             item = by_prompt.get(prompt)
-            out.append(
-                1.0 if item is not None and verify_fn(item, truncate_at_stop(completion, stop))
-                else 0.0
-            )
+            if item is None:
+                out.append(0.0)
+                correct.append(0.0)
+                continue
+            text = truncate_at_stop(completion, stop)
+            ok = 1.0 if verify_fn(item, text) else 0.0
+            correct.append(ok)
+            out.append(ok if train_reward_fn is None else float(train_reward_fn(item, text)))
+        if correctness_sink is not None:
+            correctness_sink(correct)
         return out
 
     return reward_fn
@@ -250,7 +273,10 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
     recorder = GroupedRewardRecorder(num_generations=spec.num_generations)
     stats = CompletionStats(spec.stop)
     reward_fn = recorder.wrap(
-        stats.wrap(build_reward_fn(spec.items, spec.verify_fn, stop=spec.stop))
+        stats.wrap(build_reward_fn(
+            spec.items, spec.verify_fn, stop=spec.stop,
+            train_reward_fn=spec.train_reward_fn, correctness_sink=recorder.record_correct,
+        ))
     )
 
     if trainer_factory is None:
@@ -338,6 +364,13 @@ def run_grpo(spec: GRPOSpec, trainer_factory=None, peft_config=None) -> list[Ste
         "generation_stop": spec.stop,
         "include_stop_str_in_output": spec.stop is not None,
         "completion_stop": spec.stop,
+        # Training reward (transfer-rulings T23): "shaped" on the probe suites,
+        # "binary" (the verifier) on gsm8k. The step telemetry's mean_reward is
+        # over this reward; mean_correct is over the verifier.
+        "train_reward": "binary" if spec.train_reward_fn is None else "shaped",
+        "train_reward_scores": None if spec.train_reward_fn is None else {
+            "correct": CORRECT_SCORE, "format": FORMAT_SCORE, "no_answer": NO_ANSWER_SCORE,
+        },
         "vllm_gpu_memory_utilization": VLLM_GPU_MEMORY_UTILIZATION,
         "vllm_enable_sleep_mode": VLLM_ENABLE_SLEEP_MODE,
         "vllm_max_model_length": VLLM_MAX_MODEL_LENGTH,

@@ -32,7 +32,7 @@ def _passk(p1: float, p32: float) -> PassKResult:
 
 @pytest.fixture
 def runner(tmp_path, monkeypatch):
-    calls = {"passk": 0, "grpo": 0}
+    calls = {"passk": 0, "grpo": 0, "specs": []}
 
     def fake_passk(model_path, items, verify_fn, ks, **kw):
         calls["passk"] += 1
@@ -41,6 +41,7 @@ def runner(tmp_path, monkeypatch):
 
     def fake_grpo(spec, **kw):
         calls["grpo"] += 1
+        calls["specs"].append(spec)
         return [
             StepRecord(step=i, mean_reward=0.1 * i, group_reward_std=0.2,
                        zero_advantage_frac=0.1, policy_entropy=2.0 - 0.01 * i,
@@ -125,3 +126,9 @@ def test_full_run_raises_when_the_target_suite_has_no_breadth(runner, monkeypatc
     with pytest.raises(ValueError, match="no measurable breadth") as excinfo:
         runner.full_run("v1")
     assert "v1" in str(excinfo.value)
+
+
+def test_the_gsm8k_target_run_keeps_the_binary_reward(runner):
+    # Transfer-rulings T23 shapes the probe suites' training reward only.
+    runner.full_run("some-variant")
+    assert runner.calls["specs"][-1].train_reward_fn is None

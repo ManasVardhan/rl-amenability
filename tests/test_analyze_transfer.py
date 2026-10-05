@@ -33,7 +33,8 @@ def _meta(model: str, suite: str, seed: int, **override) -> dict:
     cfg = ProbeConfig()
     meta = {"probe_key": f"{model}-{suite}-grpo-s{seed}", "model_key": model, "suite_key": suite,
             "item_seed": 0, "run_seed": seed, "learning_rate": cfg.learning_rate,
-            "probe_steps": cfg.probe_steps, "n_step_records": cfg.probe_steps}
+            "probe_steps": cfg.probe_steps, "n_step_records": cfg.probe_steps,
+            "train_reward": "shaped"}
     meta.update(override)
     return meta
 
@@ -301,6 +302,18 @@ def test_load_arm_non_protocol_learning_rate_is_a_named_failure(tmp_path):
     loaded, failures = load_arm(tmp_path, ["m0"], "countdown", 0)
     assert loaded == {}
     assert "learning_rate" in failures["m0"] and "3e-06" in failures["m0"] and "1e-06" in failures["m0"]
+
+
+@pytest.mark.parametrize("value", [None, "binary"])
+def test_load_arm_telemetry_not_trained_on_the_shaped_reward_is_a_named_failure(tmp_path, value):
+    # Transfer-rulings T23: telemetry from before the shaped reward (no field) or
+    # trained on the binary reward is not the protocol run.
+    meta = _meta("m0", "countdown", 0, train_reward=value)
+    if value is None:
+        del meta["train_reward"]
+    _write(tmp_path, "m0", "countdown", 0, 0.5, meta=meta)
+    loaded, failures = load_arm(tmp_path, ["m0"], "countdown", 0)
+    assert loaded == {} and "train_reward" in failures["m0"]
 
 
 @pytest.mark.parametrize("field,value", [("probe_steps", 2), ("item_seed", 1)])

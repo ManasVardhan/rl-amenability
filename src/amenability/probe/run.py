@@ -186,6 +186,9 @@ def run_probe(
             num_generations=config.num_generations, learning_rate=config.learning_rate,
             beta=config.beta, temperature=config.temperature, seed=run_seed,
             output_dir=str(out_dir), save_steps=None, stop=suite.stop,
+            # Shaped training reward (transfer-rulings T23); verify_fn stays the
+            # binary correctness that pre/post pass@k and mean_correct use.
+            train_reward_fn=suite.train_reward,
         )
     )
     wall["train"] = time.monotonic() - t0
@@ -215,6 +218,8 @@ def run_probe(
         "item_seed": item_seed, "run_seed": run_seed,
         "learning_rate": config.learning_rate, "probe_steps": config.probe_steps,
         "n_step_records": len(records), "wall_seconds": wall,
+        # The analysis accepts only telemetry trained on this reward (T23).
+        "train_reward": "shaped",
         "peak_memory_bytes": None if cuda is None else max(pre_peak, int(cuda.max_memory_allocated())),
         "peak_train_bytes": peak_train,
         "allocated_after_train_bytes": allocated_after_train,

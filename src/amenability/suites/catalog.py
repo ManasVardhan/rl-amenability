@@ -13,6 +13,7 @@ from amenability.suites.base import ANSWER_STOP, TaskItem
 from amenability.suites.countdown import generate_countdown, verify_countdown
 from amenability.suites.graphpath import SUITE_NAME as GRAPHPATH_NAME
 from amenability.suites.graphpath import generate_graphpath, verify_graphpath
+from amenability.training.reward import shaped_reward
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,12 @@ class ProbeSuite:
     # Generation stops at the first occurrence (transfer-rulings T20). Both probe
     # suites answer in <answer> tags; None would mean "no stop".
     stop: str | None = ANSWER_STOP
+
+    def train_reward(self, item: TaskItem, completion: str) -> float:
+        """The GRPO training reward (transfer-rulings T23): 1.0 if verify accepts,
+        0.1 for an answer block it rejects, 0.0 for no answer block. Training only;
+        every evaluation and the SFT filter use verify, which stays binary."""
+        return shaped_reward(self.verify, item, completion)
 
 
 PROBE_SUITES: dict[str, ProbeSuite] = {

@@ -123,3 +123,35 @@ def test_non_finite_infinity_also_raises():
     t = make_telemetry([2.0] * 10, [float('inf')] + [0.1] * 9, [0.2] * 10)
     with pytest.raises(ValueError, match="non-finite mean_reward"):
         extract_features(t)
+
+
+# Transfer-rulings T23: correctness-only step fields beside the training reward.
+
+def test_correctness_fields_round_trip_and_default_to_none_on_old_files():
+    t = make_telemetry([1.0] * 2, [0.1, 0.2], [0.5, 0.4])
+    t.steps = [StepRecord(step=1, mean_reward=0.1, group_reward_std=0.1,
+                          zero_advantage_frac=0.5, policy_entropy=1.0, kl=0.0,
+                          grad_norm=1.0, mean_correct=0.02, zero_correct_group_frac=0.9)]
+    back = ProbeTelemetry.from_json(json.loads(t.to_json()))
+    assert back.steps[0].mean_correct == 0.02
+    assert back.steps[0].zero_correct_group_frac == 0.9
+    old = json.loads(t.to_json())
+    for s in old["steps"]:
+        del s["mean_correct"], s["zero_correct_group_frac"]
+    assert ProbeTelemetry.from_json(old).steps[0].mean_correct is None
+
+
+def test_features_do_not_read_the_correctness_fields():
+    # The scored features describe the learning signal, i.e. the training reward.
+    a = make_telemetry([1.0, 0.9, 0.8], [0.0, 0.05, 0.1], [0.9, 0.5, 0.3])
+    b = make_telemetry([1.0, 0.9, 0.8], [0.0, 0.05, 0.1], [0.9, 0.5, 0.3])
+    b.steps = [StepRecord(**{**s.__dict__, "mean_correct": 0.0, "zero_correct_group_frac": 1.0})
+               for s in b.steps]
+    assert extract_features(a) == extract_features(b)
+
+
+def test_non_finite_correctness_is_refused():
+    t = make_telemetry([1.0] * 2, [0.1, 0.2], [0.5, 0.4])
+    t.steps = [StepRecord(**{**s.__dict__, "mean_correct": float("nan")}) for s in t.steps]
+    with pytest.raises(ValueError, match="mean_correct"):
+        extract_features(t)

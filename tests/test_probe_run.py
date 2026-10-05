@@ -113,6 +113,10 @@ def test_suite_verifier_reaches_both_evaluation_and_training(tmp_path, fakes):
     _run(tmp_path, fakes, suite_key="graphpath")
     assert state["verify_fn"] is verify_graphpath
     assert state["train_specs"][0].verify_fn is verify_graphpath
+    # Transfer-rulings T23: training uses the suite's shaped reward; evaluation
+    # keeps the binary verifier (asserted just above).
+    from amenability.suites.catalog import get_probe_suite
+    assert state["train_specs"][0].train_reward_fn == get_probe_suite("graphpath").train_reward
     assert all(it.suite == "probe_graphpath" for it in state["train_specs"][0].items)
 
 
@@ -324,3 +328,9 @@ def test_suite_stop_reaches_evaluation_and_training(tmp_path, fakes, suite_key):
     _run(tmp_path, fakes, suite_key=suite_key, evaluate_fn=spy)
     assert stops == ["</answer>", "</answer>"]
     assert state["train_specs"][0].stop == "</answer>"
+
+
+def test_meta_records_the_shaped_training_reward(tmp_path, fakes):
+    _run(tmp_path, fakes)
+    meta = json.loads(meta_path(tmp_path, "m", "countdown", 0).read_text())
+    assert meta["train_reward"] == "shaped"

@@ -15,6 +15,12 @@ COLLAPSE_FRACTION = 0.5
 
 @dataclass(frozen=True)
 class StepRecord:
+    """One GRPO step. mean_reward, group_reward_std and zero_advantage_frac are
+    over the TRAINING reward, the signal GRPO learns from: on the probe suites
+    the shaped reward of transfer-rulings T23 (1.0 / 0.1 / 0.0), on gsm8k the
+    binary verifier. mean_correct and zero_correct_group_frac are the same
+    statistics over strict 0/1 correctness (the suite verifier), so the
+    correctness signal stays visible; None in telemetry written before T23."""
     step: int
     mean_reward: float
     group_reward_std: float
@@ -22,6 +28,8 @@ class StepRecord:
     policy_entropy: float
     kl: float
     grad_norm: float
+    mean_correct: float | None = None
+    zero_correct_group_frac: float | None = None
 
 
 @dataclass
@@ -109,6 +117,15 @@ def extract_features(t: ProbeTelemetry) -> FeatureVector:
                     f"non-finite {field_name}={value} at step {s.step} for "
                     f"{t.model_key}/{t.algorithm}: training likely diverged, and a "
                     "non-finite entropy would otherwise be scored as perfect retention"
+                )
+        for field_name, value in (
+            ("mean_correct", s.mean_correct),
+            ("zero_correct_group_frac", s.zero_correct_group_frac),
+        ):
+            if value is not None and not math.isfinite(value):
+                raise ValueError(
+                    f"non-finite {field_name}={value} at step {s.step} for "
+                    f"{t.model_key}/{t.algorithm}"
                 )
 
     entropies = [s.policy_entropy for s in t.steps]
