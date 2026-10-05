@@ -88,6 +88,37 @@ below:
   signal, not on the pass@32 floored rule. Named candidates, the rule and its
   no-launch outcome are in T22 and in "Training-pool difficulty" below.
 
+## Second amendment of 2026-10-04
+
+Made on 2026-10-04, before any batch data existed and before any shaped-reward
+calibration number existed, from the T22 difficulty calibration, under which no
+candidate was selected (6 to 7 of 9 models far below 0.15 group signal on every
+candidate; 65 to 90% of their samples format failures). The owner chose the
+first of the remedies T22 listed. Recorded as ruling T23 in
+`docs/decisions/transfer-rulings.md` and edited into the sections below:
+
+- Training reward: on both probe suites GRPO trains on a partial format reward
+  as in TinyZero: 1.0 if the suite verifier accepts the (T20-truncated)
+  completion, 0.1 if it has an `<answer>...</answer>` block the verifier
+  rejects, 0.0 if it has none. Evaluation (pass@k, conversion rate, pre/post)
+  and the rejection-sampling SFT filter stay strict 0/1. gsm8k keeps its binary
+  reward.
+- Telemetry: the per-step `mean_reward`, `group_reward_std` and
+  `zero_advantage_frac` are over the training (shaped) reward; `mean_correct`
+  and `zero_correct_group_frac` are added over strict correctness. The scored
+  features keep their definitions and read the training-reward fields.
+  Telemetry counts only if its meta records `train_reward: "shaped"`.
+- Naive baseline (Gate B, Stage 0): fitted to the strict correctness trace
+  (`mean_correct`), not the shaped reward, by the frozen `naive_extrapolation`.
+- Selection rule: condition (a) reads the shaped group-signal rate (items whose
+  8 shaped rewards are not all equal) instead of the strict one; (b), the
+  candidate order, guesser eligibility, the floored exemption and the
+  no-launch fallback are unchanged. The strict correct-signal rate is reported,
+  not gated. The calibration is rerun to save the per-item category counts the
+  shaped rate needs.
+- Reporting: a weak model's measured gain includes format acquisition, and the
+  write-up says so.
+
 ## Question
 
 Q1, probe invariance: does a model's probe score depend on which probe suite
@@ -123,6 +154,23 @@ replicate on Countdown. No ground truth is involved.
   and including its first `</answer>`, and the verifiers read the first
   `<answer>...</answer>` block. Both pass@k and GRPO stop generation there (GRPO
   through a colocated vLLM engine, T21), and both also truncate before scoring.
+- Training reward (amended, T23): GRPO on a probe suite is rewarded 1.0 when the
+  suite verifier accepts the completion, 0.1 when the completion has an
+  `<answer>...</answer>` block that the verifier rejects (prose, wrong numbers or
+  value, any malformed content inside the tags), 0.0 when it has no closed answer
+  block, all on the completion truncated at its first `</answer>`; the first
+  block counts. Constants in `src/amenability/training/reward.py`. This is the
+  training reward only; every pass@k, the conversion rate and pre/post
+  evaluation use the strict 0/1 verifier.
+- Telemetry (amended, T23): per step, `mean_reward`, `group_reward_std` and
+  `zero_advantage_frac` are over the training reward (the learning signal), and
+  `mean_correct` and `zero_correct_group_frac` over strict correctness.
+  `zero_advantage_rate` is therefore the share of groups whose 8 shaped rewards
+  tie, `retention_factor`'s reward gain is the shaped reward's, and
+  `conversion_rate` is strict. Accepted telemetry also requires the meta to
+  record `train_reward: "shaped"`. The measured gain of a weak model includes
+  format acquisition (a model learning to tag answers it could already compute),
+  and the write-up states this.
 - Items: generated from item seed 0 for every arm. Run seed 0 for the two suite
   arms, run seed 1 for the Countdown replicate.
 - Statistics: `spearman_with_ci` (percentile bootstrap, permutation p, 10,000
@@ -152,7 +200,7 @@ suites. Bucket changes decided at calibration are pre-batch calibration,
 recorded as a ruling before the batch launches, and none is a protocol change
 after data.
 
-### Training-pool difficulty (amended, T22)
+### Training-pool difficulty (amended, T22; selection rule revised, T23)
 
 GRPO with a group of 8 learns from a prompt only if one of its 8 rollouts is
 correct, so the pass@8 group signal, not pass@32, governs the training pool's
@@ -179,6 +227,26 @@ remedies listed but not implemented (a partial format reward as in TinyZero, a
 larger group size, or accepting zero-signal models). If a candidate satisfies
 (a) but none satisfies both, the batch also does not launch. The selected
 candidate is the suite's item pool for training and for the pre- and post-eval.
+
+Revised (T23), superseding the rule above, which selected nothing. The probe
+now trains on the shaped reward, so the share of GRPO groups with a nonzero
+advantage is the share of items whose 8 SHAPED rewards (1.0 / 0.1 / 0.0) are not
+all equal. The calibration saves each item's count of every taxonomy category
+over its 8 samples and reports this shaped group-signal rate; it is rerun for
+the purpose. Per suite, take the candidate closest to current (same order, a
+Graph candidate only if guesser-eligible as above) such that
+
+- (a) every model not floored on that suite in the pilot has SHAPED group-signal
+  rate >= 0.15 over the candidate's pool (a model with no shaped result fails),
+  and
+- (b) the best model's strict pass@1 is <= 0.80.
+
+Both thresholds are inclusive. Each model's strict correct-signal rate (items
+with at least one correct of 8) is reported beside it and does not gate. If no
+candidate satisfies (a) and (b), the batch does NOT launch and the owner
+decides (remaining remedies: a larger group size, or accepting zero-signal
+models). Applied by `scripts/analyze_calibration.py` (default `--reward
+shaped`); `--reward strict` reproduces the T22 rule for the record.
 
 ## Decision rule
 

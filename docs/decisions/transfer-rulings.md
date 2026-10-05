@@ -676,3 +676,170 @@ models; (b) is the guard, and its threshold is a judgement. If the weak models'
 failures are format, no candidate passes (a) and the batch waits for an owner
 decision, which costs time, not data. If the trees or larger distances turn out
 harder for models, the rule simply does not select them.
+
+**T23. The probe suites train on a partial format reward as in TinyZero, and the
+difficulty selection gates on the shaped group signal.**
+Made on 2026-10-04, before any batch data existed, from the T22 difficulty
+calibration (`results/calibration/` on CARC, T22 code at 4c872e6). The
+calibration is pre-batch, not scored, and no probe (training) job had run under
+it. The remedy was chosen by the owner from the list T22 pre-registered.
+*What the calibration showed.* Under the strict 0/1 reward the T22 rule selected
+no candidate on either suite. Six to seven of the nine models have a group-signal
+rate (items with at least one correct of 8, sampled as GRPO rollouts are:
+temperature 1.0, top_p 1.0, top_k 0, 768 tokens, stop at `</answer>`) far below
+0.15 on every candidate, and difficulty barely moves it: on Countdown the weak
+models go from 0.00 on cd-current to 0.01 to 0.04 on cd-easier. The failure
+taxonomy says why. 65 to 90% of those models' samples are format failures
+(`no_answer_tag` plus `unparseable_answer`), and so are about 70% of
+qwen2.5-math-1.5b's. The raw samples show answers that are right but malformed,
+for example "...add 10 and 3, we get 13 ... answer>\n13\n</answer>" (the opening
+"<" is missing) and "ANSWER: (10 - 7) + 4 = 7". A strict 0/1 reward gives these
+groups no gradient at all: every rollout scores 0, the advantage is 0, and the
+model never learns the tag. Easier puzzles cannot fix a format failure, which is
+the outcome T22 anticipated ("if the weak models' failures are format, no
+candidate passes (a)").
+*Change 1: the training reward.* On both probe suites GRPO now trains on
+
+| completion, truncated at the first `</answer>` (T20) | training reward |
+|---|---|
+| the suite verifier accepts it | 1.0 (`CORRECT_SCORE`) |
+| it has an `<answer>...</answer>` block that the verifier rejects | 0.1 (`FORMAT_SCORE`) |
+| it has no closed `<answer>...</answer>` block | 0.0 (`NO_ANSWER_SCORE`) |
+
+The 0.1 tier covers everything inside the tags that is not correct: prose, an
+empty block, an expression outside the grammar, the wrong numbers, a wrong value
+or right-hand side, a division by zero, a path with a non-edge or wrong
+endpoints. The constants live in `src/amenability/training/reward.py` and nowhere
+else (`shaped_reward`); `ProbeSuite.train_reward` applies it with the suite's
+verifier, `run_probe` passes it to `GRPOSpec.train_reward_fn`, and `run_grpo`'s
+reward function returns it. TRAINING reward only: pre/post pass@k, the conversion
+rate, the calibration's pass@1 and strict signal, and the rejection-sampling SFT
+filter all still use the binary verifier. The gsm8k target run passes no
+`train_reward_fn` and keeps its binary reward (a test holds this). Both malformed
+examples above score 0.0, as they would in TinyZero; the gradient comes from
+groups in which some rollouts close a proper `<answer>` block and others do not,
+which the taxonomy shows most weak models produce.
+*TinyZero's reward, as checked.* Fetched on 2026-10-04 from
+`Jiayi-Pan/TinyZero`, branch main, `verl/utils/reward_score/countdown.py`,
+`compute_score(solution_str, ground_truth, method='strict', format_score=0.1,
+score=1.)`: no extracted answer gives 0; an answer whose digit runs are not
+exactly the available numbers gives format_score; an answer that fails the
+character whitelist or `eval` gives format_score; a value off the target by
+1e-5 or more gives format_score; otherwise score. This matches the tiering above.
+The deliberate deviations, kept:
+(i) Extraction. TinyZero keeps the text after the first "Assistant:" (or
+"<|im_start|>assistant"; with neither, the answer is None and scores 0), then
+keeps only its LAST LINE, then takes the last `<answer>(.*?)</answer>` on that
+line, without DOTALL. We read the FIRST block anywhere in the completion, across
+lines (T20). After the T20 truncation at the first `</answer>` that block closes
+the text, so the two usually agree, but a block spanning lines
+(`<answer>\n3*5-2\n</answer>`) scores 0 in TinyZero and 1.0 or 0.1 here.
+(ii) Completion only: the reward sees the completion alone (T19), so there is no
+"Assistant:" split.
+(iii) Countdown verification: one trailing "= <target>" is accepted (T19), and
+the answer is parsed in the task's grammar with exact arithmetic instead of a
+regex whitelist, `eval` and a 1e-5 tolerance. So `(10 - 7) + 4 = 7` with numbers
+10, 7, 4 and target 7 scores 1.0 here and 0.1 in TinyZero (whose digit runs
+include the trailing 7).
+(iv) Graph path, which TinyZero does not have, gets the same three tiers.
+*Why 0.1.* It is TinyZero's value, the published recipe that trained base models
+on Countdown under this exact scaffold (T19), so adopting it adds no free
+parameter chosen after seeing data. It is small enough that one correct rollout
+outweighs ten format-only ones, so once a group contains a correct answer the
+advantage is dominated by correctness, and large enough to give an all-wrong
+group a gradient toward the tag.
+*Change 2: telemetry.* `StepRecord.mean_reward`, `group_reward_std` and
+`zero_advantage_frac` are now over the TRAINING reward (shaped on the probe
+suites, binary on gsm8k), because they describe the signal GRPO learns from:
+`zero_advantage_frac` is exactly the share of groups whose advantage is zero.
+Two fields are added, over strict correctness: `mean_correct` (mean 0/1
+correctness of the step's completions) and `zero_correct_group_frac` (share of
+groups whose 8 correctness values are all equal). The reward function passes
+correctness to the recorder beside the reward it returns. Telemetry written
+before T23 loads with these as None. The run manifest records `train_reward`
+("shaped" or "binary") and its scores; the probe meta records `train_reward:
+"shaped"`, and `analyze_transfer` rejects, as a named meta mismatch (T10), any
+telemetry whose meta does not say "shaped". `run_probe` reuses any existing
+telemetry file without looking at its reward, so probe outputs produced before
+T23 (a rerun smoke included) must be deleted before the batch, as T22 item 3
+already requires for job 12633929; the analysis would reject them anyway.
+*What each consumer now reads.*
+- `extract_features`: `conversion_rate` is unchanged (strict pre/post pass@k).
+  `zero_advantage_rate` is the mean over steps of the share of groups whose 8
+  SHAPED rewards are all equal. `retention_factor` is the entropy term times
+  1 / (1 + sum of KL / max(shaped mean_reward gain from first to last step,
+  1e-6)), so reward bought in KL now includes format reward. `reward_slope_early`
+  and `reward_slope_mid` are slopes of the shaped mean reward (not scored).
+  `grad_norm_trend` and the entropy features are unchanged. No feature reads the
+  correctness fields (a test holds this).
+- `scoring/score.py` (frozen, unedited): the same formula on those inputs, so its
+  zero-advantage gate and its retention term now reflect the shaped reward and
+  its conversion term strict correctness.
+- `analyze_transfer`: scores and per-feature rhos as above; additionally requires
+  `train_reward: "shaped"` in the meta.
+- Gate B's naive baseline (Stage 0): fits on CORRECTNESS. The frozen
+  `baselines.baseline_naive` reads `mean_reward`; it is left unedited, and
+  `run_stage0` now calls `scoring/naive_correct.baseline_naive_correct`, which
+  passes `mean_correct` to the frozen `naive_extrapolation`. Reasons: the outcome
+  Gate B predicts is a correctness quantity; when Stage 0 was registered the
+  probe's reward trace WAS its correctness trace, so this keeps the registered
+  meaning ("naive extrapolation of the probe reward trace") rather than changing
+  it; and a shaped trace would extrapolate early format acquisition (a jump
+  toward 0.1 that saturates) as if it were progress toward the outcome, which
+  would make the baseline a distorted competitor in either direction. Telemetry
+  without `mean_correct` is refused.
+- Stage 0 itself: `run_probe` is the one probe implementation, so Stage 0's
+  Countdown probes also train on the shaped reward. Stage 0 has not run and
+  `prereg/FROZEN.json` does not exist; `prereg/stage0.md` is not edited by this
+  ruling, and the owner should confirm the shaped probe for Stage 0 before it
+  is frozen.
+*Change 3: calibration and the revised selection rule.* The T22 calibration
+files keep only per-item correct counts and pooled taxonomy counts, which cannot
+say whether an item with 0 correct of 8 mixes tagged and untagged samples, so
+the shaped signal cannot be computed from them. `summarize_candidate` now saves
+`per_item_categories` (each item's count of each category over its 8 samples)
+and reports per bucket and pool the `shaped_group_signal_rate`: the share of
+items whose 8 shaped rewards (category to reward: `no_answer_tag` 0.0,
+`unparseable_answer` and `parseable_wrong` 0.1, `correct` 1.0; a test checks this
+mapping equals `shaped_reward` completion by completion) are not all equal. A
+cached candidate without the counts is recomputed by the calibration script with
+the same seeds, so the strict figures reproduce. The calibration must therefore
+be rerun (`sbatch --array=0-8 scripts/slurm/calibrate.sbatch`, same command as
+T22) before the rule below can be applied; `analyze_calibration` names any model
+whose results predate the counts and does not read them as failing.
+*Selection rule (pre-registered here, before any shaped-reward number exists).*
+Per suite, walk the T22 candidates in the T22 order (hardest first), skipping
+guesser-ineligible graph candidates, and select the first such that, over the
+candidate's 300-item pool:
+ (a) every model not floored on that suite in the pilot (stablelm-2-1.6b, on
+     both suites) has SHAPED group-signal rate >= 0.15; a roster model with no
+     shaped result fails (a); and
+ (b) the best model's STRICT pass@1 (over all nine models) is <= 0.80.
+Both thresholds are inclusive. Each model's strict correct-signal rate (items
+with at least one correct of 8) is reported beside it and does not gate. If no
+candidate is selected, the batch does NOT launch and the owner decides (T22's
+fallback); the remaining listed remedies are a larger group size or accepting
+zero-signal models. Applied by `select_candidate(..., signal_key=
+"shaped_group_signal_rate")`, the default of `scripts/analyze_calibration.py`,
+which writes `selection.json` and `report.md`; `--reward strict` reproduces the
+superseded T22 rule into `selection_t22.json` and `report_t22.md`.
+*Consequence for the write-up.* Pre/post pass@1 stays strict, but a weak model
+that learns during the probe to wrap answers it could already compute in a
+proper tag raises its strict post pass@1. Its measured gain, and so its
+conversion rate, therefore includes format acquisition, not only conversion of
+latent breadth into reliability. The write-up must state this, and must not
+read a weak model's conversion as pure search improvement; `mean_correct` and
+`mean_reward` per step show how much of the reward rise was the 0.1 tier.
+*Cost if wrong:* (1) The format tier can be farmed: a policy that emits any
+tagged text collects 0.1 on every rollout, the groups go uniform again, and the
+zero-advantage rate climbs back. It shows in telemetry as mean_reward near 0.1
+with mean_correct flat. (2) A model can meet (a) on format variance alone while
+its correct-signal rate is near 0, so its probe learns formatting and little
+else; the reported correct-signal rate shows this before the batch, and the
+conversion feature (strict) will show it after. (3) The shaped zero-advantage
+rate is lower than the strict one for weak models, which raises their score's
+gate, and retention now credits cheap format reward, so the score can move
+toward models with format headroom. This is a change in what is measured,
+uniform across models, not a known bias toward the hypothesis; the per-feature
+transfer rhos expose it. (4) If shaped signal still fails (a), the batch waits
+for an owner decision, which costs time, not data.

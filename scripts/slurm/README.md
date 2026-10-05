@@ -164,7 +164,7 @@ with a CuMemAllocator or expandable-segments error, check that
 ## 4. The batch (30 GPU jobs, over 1 h each)
 
 Do not launch before the difficulty calibration (section 6) has selected the
-training-pool candidates under the T22 selection rule.
+training-pool candidates under the T23 selection rule (shaped group signal).
 
 Each batch job runs two pre-eval-sized evaluations (pre and post, about 30 min
 each at the pilot's measured rate) plus 60 GRPO steps, so expect well over the
@@ -212,7 +212,7 @@ prefix, otherwise the ids index the batch manifest and run a different job:
 
 ## 6. Difficulty calibration (9 GPU jobs, before the batch)
 
-Transfer-rulings T22. Samples every difficulty candidate (`src/amenability/suites/difficulty.py`)
+Transfer-rulings T22, revised by T23. Samples every difficulty candidate (`src/amenability/suites/difficulty.py`)
 for each of the nine pilot models, 8 completions per item over the candidate's
 300-item pool, with the GRPO rollout sampling. Sampling only, so any bf16 GPU
 (the script requests `a100|l40s|a40`):
@@ -226,6 +226,19 @@ A task killed by the walltime resumes from its finished candidates when rerun
 
     uv run python -m scripts.analyze_calibration --dir results/calibration
     # prints the tables, writes results/calibration/selection.json and report.md
+
+The T23 rule gates on the shaped group-signal rate (items whose 8 shaped
+training rewards, 1.0 / 0.1 / 0.0, are not all equal), which needs the per-item
+category counts the calibration saves since T23. Results written by the T22 run
+lack them: rerun the same array (`sbatch --array=0-8 scripts/slurm/calibrate.sbatch`,
+no `--force` needed); each task recomputes only candidates without the counts,
+with the same seeds, so the strict figures reproduce. Until then the analysis
+names those models as needing a rerun. Move the T22 `selection.json` and
+`report.md` aside first if you want to keep them; the T22 rule can also be
+reproduced at any time:
+
+    uv run python -m scripts.analyze_calibration --dir results/calibration --reward strict
+    # writes selection_t22.json and report_t22.md
 
 The selection rule is applied mechanically; if `selection.json` says
 `batch_may_launch: false`, the batch does not launch and the owner decides.
